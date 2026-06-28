@@ -1,0 +1,13 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+.claude/
+
+# Raw tick data is large and should not be committed to GitHub.
+data/*.csv
+!data/spread_logger.py
+
+# Generated visual verification artifacts.
+research/*_visual_checks/
+
