@@ -439,8 +439,9 @@ def on_tick(trade: Trade, ts: datetime, mid: float) -> None:
             trade.stop_price = trade.entry_price - STOP_USD if trade.setup.direction == "bullish" else trade.entry_price + STOP_USD
             trade.net_r -= half_spread_r(ts)
         return
+    assert trade.stop_price is not None
     value = r_now(mid, trade)
-    stop_r = 0.0 if trade.hit_1r else -1.0
+    stop_r = r_now(trade.stop_price, trade)
     if value <= stop_r:
         close_weight(trade, ts, trade.open_weight, value)
         return
@@ -452,9 +453,10 @@ def on_tick(trade: Trade, ts: datetime, mid: float) -> None:
         if target == 3.0 and trade.hit_3r:
             continue
         if value >= target:
-            close_weight(trade, ts, weight, target)
+            close_weight(trade, ts, weight, value)
             if target == 1.0:
                 trade.hit_1r = True
+                trade.stop_price = trade.entry_price
             elif target == 2.0:
                 trade.hit_2r = True
             else:

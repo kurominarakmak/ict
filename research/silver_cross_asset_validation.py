@@ -262,7 +262,7 @@ def on_tick(trade: Trade, ts: datetime, mid: float, stop_size: float) -> None:
         if target == 3.0 and trade.hit_3r:
             continue
         if value >= target:
-            close_weight(trade, ts, weight, target, stop_size)
+            close_weight(trade, ts, weight, value, stop_size)
             if target == 1.0:
                 trade.hit_1r = True
                 trade.stop_price = trade.entry_price
