@@ -105,6 +105,7 @@ class Trade:
     net_p90_r: float = 0.0
     tp1_hit: bool = False
     exited: bool = False
+    gap_skipped: bool = False
     horizon_exit: bool = False
     next_bar_update: int = 0
 
@@ -289,11 +290,33 @@ def has_fvg(bars: list[Bar], ob: int, imp: int, direction: str) -> bool:
     return False
 
 
-def detect_obs(bars: list[Bar], atr: list[Optional[float]], avail_swings: list[list[Swing]]) -> tuple[list[OB], dict[int,str]]:
+def zone_overlap_ratio(new_ob: OB, old_ob: OB) -> float:
+    overlap = max(0.0, min(new_ob.high, old_ob.high) - max(new_ob.low, old_ob.low))
+    height = max(new_ob.high - new_ob.low, 1e-12)
+    return overlap / height
+
+
+def is_duplicate_ob(new_ob: OB, obs: list[OB], mitigated: set[int]) -> bool:
+    for old in obs:
+        if old.ob_id in mitigated or old.direction != new_ob.direction:
+            continue
+        if zone_overlap_ratio(new_ob, old) > 0.50:
+            return True
+    return False
+
+
+def detect_obs(bars: list[Bar], atr: list[Optional[float]], avail_swings: list[list[Swing]]) -> tuple[list[OB], dict[int,str], int]:
     obs: list[OB] = []
+    mitigated: set[int] = set()
+    raw_count = 0
     broken_h=set(); broken_l=set(); break_dir={}
     latest_h=latest_l=None
     for i,b in enumerate(bars):
+        for old in obs:
+            if old.ob_id in mitigated or i <= old.creation_index or bars[old.creation_index].segment_id != b.segment_id:
+                continue
+            if b.low <= old.high and b.high >= old.low:
+                mitigated.add(old.ob_id)
         for s in avail_swings[i]:
             if s.confirmed_at == i:
                 if s.kind=="high": latest_h=s
@@ -303,14 +326,20 @@ def detect_obs(bars: list[Bar], atr: list[Optional[float]], avail_swings: list[l
         if latest_h and latest_h.index not in broken_h and bars[latest_h.index].segment_id==b.segment_id and b.high>latest_h.level:
             break_dir[i]="bullish"; ob=find_last_opposite(bars,i,"bullish")
             if ob is not None and (b.high-bars[ob].low)/a>=DISPLACEMENT_ATR:
-                obs.append(OB(len(obs)+1,"bullish",bars[ob].high,bars[ob].low,i,ob,a,(b.high-bars[ob].low)/a,has_fvg(bars,ob,i,"bullish"),classify_session(b.end),b.end.year))
+                raw_count += 1
+                candidate = OB(len(obs)+1,"bullish",bars[ob].high,bars[ob].low,i,ob,a,(b.high-bars[ob].low)/a,has_fvg(bars,ob,i,"bullish"),classify_session(b.end),b.end.year)
+                if not is_duplicate_ob(candidate, obs, mitigated):
+                    obs.append(candidate)
                 broken_h.add(latest_h.index)
         if latest_l and latest_l.index not in broken_l and bars[latest_l.index].segment_id==b.segment_id and b.low<latest_l.level:
             break_dir[i]="bearish"; ob=find_last_opposite(bars,i,"bearish")
             if ob is not None and (bars[ob].high-b.low)/a>=DISPLACEMENT_ATR:
-                obs.append(OB(len(obs)+1,"bearish",bars[ob].high,bars[ob].low,i,ob,a,(bars[ob].high-b.low)/a,has_fvg(bars,ob,i,"bearish"),classify_session(b.end),b.end.year))
+                raw_count += 1
+                candidate = OB(len(obs)+1,"bearish",bars[ob].high,bars[ob].low,i,ob,a,(bars[ob].high-b.low)/a,has_fvg(bars,ob,i,"bearish"),classify_session(b.end),b.end.year)
+                if not is_duplicate_ob(candidate, obs, mitigated):
+                    obs.append(candidate)
                 broken_l.add(latest_l.index)
-    return obs, break_dir
+    return obs, break_dir, raw_count
 
 
 def quantile(vals: list[float], q: float) -> float:
@@ -392,7 +421,7 @@ def run_ticks(path: Path, bars: list[Bar], swings_avail: list[list[Swing]], setu
     return done
 
 
-def run_ticks_many(path: Path, bars: list[Bar], swings_avail: list[list[Swing]], cohorts: list[tuple[str, list[Setup], str]]) -> dict[str, list[Trade]]:
+def run_ticks_many(path: Path, bars: list[Bar], swings_avail: list[list[Swing]], cohorts: list[tuple[str, list[Setup], str]]) -> tuple[dict[str, list[Trade]], dict[str, int]]:
     trades: list[Trade] = []
     labels: dict[int, str] = {}
     for label, setups, variant in cohorts:
@@ -404,8 +433,9 @@ def run_ticks_many(path: Path, bars: list[Bar], swings_avail: list[list[Swing]],
             trades.append(trade)
     trades.sort(key=lambda t: bars[t.setup.entry_bar].start)
     out: dict[str, list[Trade]] = {label: [] for label, _, _ in cohorts}
+    gap_skips: dict[str, set[int]] = {label: set() for label, _, _ in cohorts}
     if not trades:
-        return out
+        return out, {label: 0 for label in out}
 
     first = min(bars[t.setup.entry_bar].start for t in trades)
     last = max(bars[t.setup.max_exit_bar].end for t in trades)
@@ -431,17 +461,21 @@ def run_ticks_many(path: Path, bars: list[Bar], swings_avail: list[list[Swing]],
                 active.append(trades[p]); p += 1
             keep: list[Trade] = []
             for trade in active:
-                update_bar_events(trade, bars, swings_avail, ts, mid)
                 if not trade.entered:
                     if (
                         (trade.setup.ob.direction == "bullish" and mid <= trade.setup.ob.high)
                         or (trade.setup.ob.direction == "bearish" and mid >= trade.setup.ob.low)
                     ):
                         enter(trade, ts, mid)
+                        if trade.gap_skipped:
+                            gap_skips[labels[id(trade)]].add(trade.setup.setup_id)
                 if trade.entered and not trade.exited:
                     on_tick(trade, ts, mid)
+                if trade.entered and not trade.exited:
+                    update_bar_events(trade, bars, swings_avail, ts, mid)
                 if trade.exited:
-                    out[labels[id(trade)]].append(trade)
+                    if trade.entered:
+                        out[labels[id(trade)]].append(trade)
                 else:
                     keep.append(trade)
             active = keep
@@ -457,15 +491,21 @@ def run_ticks_many(path: Path, bars: list[Bar], swings_avail: list[list[Swing]],
             )
             trade.horizon_exit = True
             out[labels[id(trade)]].append(trade)
-    return out
+    return out, {label: len(ids) for label, ids in gap_skips.items()}
 
 
 def enter(t: Trade, ts, mid):
-    t.entered=True; t.entry_time=ts; t.entry_mid=mid
     if t.setup.ob.direction=="bullish":
-        t.stop_price=t.setup.ob.low; t.risk=mid-t.stop_price
+        if mid <= t.setup.ob.low:
+            t.gap_skipped=True; t.exited=True; return
+        entry = t.setup.ob.high
+        t.stop_price=t.setup.ob.low; t.risk=entry-t.stop_price
     else:
-        t.stop_price=t.setup.ob.high; t.risk=t.stop_price-mid
+        if mid >= t.setup.ob.high:
+            t.gap_skipped=True; t.exited=True; return
+        entry = t.setup.ob.low
+        t.stop_price=t.setup.ob.high; t.risk=t.stop_price-entry
+    t.entered=True; t.entry_time=ts; t.entry_mid=entry
     if t.risk is None or t.risk<=0: t.exited=True; return
     t.net_median_r -= spread_r(ts,t.risk,SpreadMode.MEDIAN)/2
     t.net_p90_r -= spread_r(ts,t.risk,SpreadMode.P90)/2
@@ -521,7 +561,8 @@ def summarize(trades):
     vals=[t.net_median_r for t in trades]; gross=[t.gross_r for t in trades]; p90=[t.net_p90_r for t in trades]
     if not vals: return {}
     m=mean(vals); sd=pstdev(vals) if len(vals)>1 else 0; se=sd/math.sqrt(len(vals))
-    return dict(n=len(vals),gross=mean(gross),net=m,p90=mean(p90),lo=m-1.96*se,hi=m+1.96*se,win=sum(v>0 for v in vals)/len(vals),std=sd,worst=min(vals),maxloss=maxloss(vals),rr=mean([t.gross_r for t in trades]),cost=mean([t.gross_r-t.net_median_r for t in trades]))
+    costs=[t.gross_r-t.net_median_r for t in trades]
+    return dict(n=len(vals),gross=mean(gross),net=m,p90=mean(p90),lo=m-1.96*se,hi=m+1.96*se,win=sum(v>0 for v in vals)/len(vals),std=sd,worst=min(vals),gross_worst=min(gross),gross_below_minus_1=sum(v < -1.000001 for v in gross),maxloss=maxloss(vals),rr=mean([t.gross_r for t in trades]),cost=mean(costs),max_cost=max(costs))
 
 
 def maxloss(vals):
@@ -533,11 +574,11 @@ def maxloss(vals):
 
 
 def print_table(title,trades):
-    print("\\n"+title); print("group,n,gross,net,p90,ci_low,ci_high,win,std,max_loss,worst,mean_cost_R")
+    print("\\n"+title); print("group,n,gross,net,p90,ci_low,ci_high,win,std,max_loss,worst_net,worst_gross,gross_below_-1_count,mean_cost_R,max_cost_R")
     for name,rows in trades:
         s=summarize(rows)
-        if not s: print(f"{name},0,n/a,n/a,n/a,n/a,n/a,n/a,n/a,n/a,n/a,n/a")
-        else: print(f"{name},{s['n']},{s['gross']:.4f},{s['net']:.4f},{s['p90']:.4f},{s['lo']:.4f},{s['hi']:.4f},{s['win']:.2%},{s['std']:.4f},{s['maxloss']},{s['worst']:.4f},{s['cost']:.4f}")
+        if not s: print(f"{name},0,n/a,n/a,n/a,n/a,n/a,n/a,n/a,n/a,n/a,n/a,n/a,n/a")
+        else: print(f"{name},{s['n']},{s['gross']:.4f},{s['net']:.4f},{s['p90']:.4f},{s['lo']:.4f},{s['hi']:.4f},{s['win']:.2%},{s['std']:.4f},{s['maxloss']},{s['worst']:.4f},{s['gross_worst']:.4f},{s['gross_below_minus_1']},{s['cost']:.4f},{s['max_cost']:.4f}")
 
 
 def run(timeframe):
@@ -545,7 +586,7 @@ def run(timeframe):
     path=default_tick_path()
     print(f"Loading {timeframe} bars...",flush=True); bars=load_bars(path,minutes)
     atr=compute_atr(bars); adx=compute_adx(bars); events,avail=confirmed_swings(bars)
-    obs,break_dir=detect_obs(bars,atr,avail)
+    obs,break_dir,raw_ob_count=detect_obs(bars,atr,avail)
     trend_setups=build_setups(bars,atr,adx,avail,obs,break_dir,True,"trend")
     base_pool=build_setups(bars,atr,adx,avail,obs,break_dir,False,"baseline")
     # deterministic nearest prior baseline matched direction/session/ATR bucket
@@ -555,7 +596,7 @@ def run(timeframe):
         if c:
             ch=max(c,key=lambda x:x.entry_bar); used.add(ch.setup_id); selected.append(ch)
     print("Running ticks...",flush=True)
-    results=run_ticks_many(path,bars,avail,[
+    results,gap_skips=run_ticks_many(path,bars,avail,[
         ("trend_structure",trend_setups,"structure"),
         ("trend_trailing",trend_setups,"trailing"),
         ("baseline_structure",selected,"structure"),
@@ -566,8 +607,9 @@ def run(timeframe):
     bl_struct=results["baseline_structure"]
     bl_trail=results["baseline_trailing"]
     print(f"\\nTREND_FOLLOWING_OB_CONTEXT,{timeframe}")
-    print(f"bars={len(bars)},OB_total={len(obs)},FVG_OB={sum(o.fvg_present for o in obs)},trend_setups={len(trend_setups)},baseline_matched={len(selected)}")
+    print(f"bars={len(bars)},OB_raw_before_dedup={raw_ob_count},OB_after_dedup={len(obs)},FVG_OB={sum(o.fvg_present for o in obs)},trend_setups={len(trend_setups)},baseline_matched={len(selected)}")
     print(f"news_excluded_trend={sum(s.news_proxy for s in trend_setups)}")
+    print(f"gap_skipped_trend={gap_skips['trend_structure']},gap_skipped_baseline={gap_skips['baseline_structure']}")
     print_table("OVERALL", [("trend_structure",tr_struct),("trend_trailing",tr_trail),("baseline_structure",bl_struct),("baseline_trailing",bl_trail)])
     for variant, trs in [("structure",tr_struct),("trailing",tr_trail)]:
         print_table(f"BY_STATE_{variant}", [(st,[t for t in trs if t.setup.state==st]) for st in ("trending","ranging")])

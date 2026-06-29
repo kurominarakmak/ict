@@ -67,6 +67,7 @@ class TickTrade:
     hit_2r: bool = False
     hit_3r: bool = False
     be_saved: bool = False
+    gap_skipped: bool = False
     resolved: bool = False
     exit_time: Optional[datetime] = None
     fills: int = 0
@@ -177,6 +178,16 @@ def touches_entry_zone(mid: float, breaker: Breaker) -> bool:
     return mid >= breaker.zone_low
 
 
+def entry_edge(breaker: Breaker) -> float:
+    return breaker.zone_high if breaker.flipped_direction == "bullish" else breaker.zone_low
+
+
+def gap_skipped_entry(mid: float, breaker: Breaker) -> bool:
+    if breaker.flipped_direction == "bullish":
+        return mid <= breaker.zone_low
+    return mid >= breaker.zone_high
+
+
 def r_from_entry(mid: float, trade: TickTrade) -> float:
     assert trade.entry_mid is not None
     if trade.direction == "bullish":
@@ -190,9 +201,13 @@ def apply_exit_cost(trade: TickTrade, ts: datetime, weight: float) -> None:
 
 
 def enter_trade(trade: TickTrade, ts: datetime, mid: float) -> None:
+    if gap_skipped_entry(mid, trade.setup.breaker):
+        trade.gap_skipped = True
+        trade.resolved = True
+        return
     trade.entry_found = True
     trade.entry_time = ts
-    trade.entry_mid = mid
+    trade.entry_mid = entry_edge(trade.setup.breaker)
     trade.net_r_median -= ENTRY_WEIGHT * half_spread_r(ts, trade.frozen_atr, SpreadMode.MEDIAN)
     trade.net_r_p90 -= ENTRY_WEIGHT * half_spread_r(ts, trade.frozen_atr, SpreadMode.P90)
     trade.fills += 1
@@ -222,7 +237,7 @@ def update_trade_on_tick(trade: TickTrade, ts: datetime, mid: float) -> None:
     if r_now <= trade.stop_r:
         if trade.stop_r == 0.0 and trade.open_weight > 0:
             trade.be_saved = True
-        close_weight(trade, ts, trade.open_weight, trade.stop_r)
+        close_weight(trade, ts, trade.open_weight, r_now)
         return
 
     for target_r, weight in SCALE_PLAN:
@@ -302,6 +317,7 @@ def run_tick_model(tick_path: Path, bars: list[Bar], setups: list[TradeSetup]) -
     pending = list(trades)
     active: list[TickTrade] = []
     completed: list[TickTrade] = []
+    gap_skips: list[TickTrade] = []
     pending_idx = 0
 
     if not trades:
@@ -338,7 +354,10 @@ def run_tick_model(tick_path: Path, bars: list[Bar], setups: list[TradeSetup]) -
                 if ts <= trade.setup.horizon_bar.end:
                     update_trade_on_tick(trade, ts, mid)
                 if trade.resolved:
-                    completed.append(trade)
+                    if trade.gap_skipped:
+                        gap_skips.append(trade)
+                    else:
+                        completed.append(trade)
                 else:
                     still_active.append(trade)
             active = still_active
@@ -348,6 +367,7 @@ def run_tick_model(tick_path: Path, bars: list[Bar], setups: list[TradeSetup]) -
         if trade.entry_found:
             completed.append(trade)
     completed.sort(key=lambda trade: (trade.entry_time or trade.setup.entry_bar.end, trade.setup.breaker.breaker_id))
+    run_tick_model.last_gap_skips = len(gap_skips)  # type: ignore[attr-defined]
     return [trade for trade in completed if trade.entry_found]
 
 
@@ -563,16 +583,18 @@ def main() -> None:
     excluded = [item for item in setups if item.excluded_news_proxy]
     print("Running tick-level scale-out model...", flush=True)
     trades = run_tick_model(tick_path, bars, setups)
+    gap_skips = getattr(run_tick_model, "last_gap_skips", 0)
 
     print("\nBREAKER_PHASE_B_V2_CONTEXT")
     print(f"total_breakers={len(breakers)}")
     print(f"valid_retest_breakers={sum(1 for item in breakers if item.valid_retest)}")
     print(f"full_window_setups={len(setups)}")
     print(f"news_proxy_excluded={len(excluded)}")
+    print(f"gap_skipped_entries={gap_skips}")
     print(f"tick_measured_trades={len(trades)}")
     print(f"atr_terciles: low<= {low_cut:.6f}, medium<= {mid_cut:.6f}, high> {mid_cut:.6f}")
     print("news_filter_note: no NFP/FOMC/CPI calendar is wired; excluded entries within +/-30 minutes of any M15 bar whose range exceeded 3*frozen_ATR.")
-    print("cost_note: spread overlay from cost_model.py applied as half-spread at entry and half-spread on each partial exit; median and p90 are identical with current placeholder table.")
+    print("cost_note: spread overlay from cost_model.py applied as half-spread at entry and half-spread on each partial exit; median uses $0.20/oz and p90/news stress uses $0.40/oz.")
 
     print_distribution(trades)
     print_group_table("NEW_MODEL_BY_ATR_REGIME", trades, ["low", "medium", "high"], "atr_bucket")

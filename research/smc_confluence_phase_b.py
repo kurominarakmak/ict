@@ -1,4 +1,4 @@
-"""
+/"""
 SMC Confluence Phase B.
 
 Locked hypothesis:
@@ -78,6 +78,7 @@ class Trade:
     hit_2r: bool = False
     hit_3r: bool = False
     be_saved: bool = False
+    gap_skipped: bool = False
     resolved: bool = False
     horizon_exit: bool = False
 
@@ -243,6 +244,20 @@ def touches_entry(mid: float, setup: Setup) -> bool:
     return setup.zone.low <= mid <= setup.zone.high
 
 
+def entry_edge(setup: Setup) -> float:
+    if setup.sweep.direction == "bullish":
+        return setup.zone.high
+    return setup.zone.low
+
+
+def gap_skipped_entry(mid: float, setup: Setup) -> bool:
+    if setup.zone.high <= setup.zone.low:
+        return False
+    if setup.sweep.direction == "bullish":
+        return mid <= setup.zone.low
+    return mid >= setup.zone.high
+
+
 def r_now(mid: float, trade: Trade) -> float:
     assert trade.entry_mid is not None
     if trade.setup.sweep.direction == "bullish":
@@ -264,16 +279,20 @@ def on_tick(trade: Trade, ts: datetime, mid: float) -> None:
         return
     if not trade.entry_found:
         if touches_entry(mid, trade.setup):
+            if gap_skipped_entry(mid, trade.setup):
+                trade.gap_skipped = True
+                trade.resolved = True
+                return
             trade.entry_found = True
             trade.entry_time = ts
-            trade.entry_mid = mid
+            trade.entry_mid = entry_edge(trade.setup)
             trade.net_r -= spread_r(ts, trade.setup.entry_atr) / 2.0
         return
     value = r_now(mid, trade)
     if value <= trade.stop_r:
         if trade.stop_r == 0:
             trade.be_saved = True
-        close_weight(trade, ts, trade.open_weight, trade.stop_r)
+        close_weight(trade, ts, trade.open_weight, value)
         return
     for target, weight in SCALE_PLAN:
         if target == 1.0 and trade.hit_1r:
@@ -312,6 +331,7 @@ def run_tick_model(tick_path: Path, bars: list[Bar], setups: list[Setup]) -> lis
     pending_idx = 0
     active: list[Trade] = []
     done: list[Trade] = []
+    gap_skips = 0
     first_needed = min(bars[t.setup.entry_bar_index].start for t in trades)
     last_needed = max(bars[t.setup.horizon_bar_index].end for t in trades)
     with tick_path.open(newline="") as handle:
@@ -344,7 +364,10 @@ def run_tick_model(tick_path: Path, bars: list[Bar], setups: list[Setup]) -> lis
                     continue
                 on_tick(trade, ts, mid)
                 if trade.resolved:
-                    done.append(trade)
+                    if trade.gap_skipped:
+                        gap_skips += 1
+                    else:
+                        done.append(trade)
                 else:
                     still.append(trade)
             active = still
@@ -353,6 +376,7 @@ def run_tick_model(tick_path: Path, bars: list[Bar], setups: list[Setup]) -> lis
         if trade.entry_found:
             done.append(trade)
     done.sort(key=lambda t: (t.entry_time or bars[t.setup.entry_bar_index].end, t.setup.setup_id))
+    run_tick_model.last_gap_skips = gap_skips  # type: ignore[attr-defined]
     return done
 
 
@@ -441,7 +465,9 @@ def main() -> None:
             expired.append(Setup(0, "expired", sweep, zone, sweep.index, min(len(bars) - 1, sweep.index + REACTION_BARS), sweep.atr, "na", False))
     print("Running tick execution...", flush=True)
     confluence_trades = run_tick_model(tick_path, bars, setups)
+    confluence_gap_skips = getattr(run_tick_model, "last_gap_skips", 0)
     baseline_trades = run_tick_model(tick_path, bars, baseline)
+    baseline_gap_skips = getattr(run_tick_model, "last_gap_skips", 0)
     excluded = sum(1 for s in setups if s.excluded_news_proxy)
 
     print("\nSMC_CONFLUENCE_PHASE_B_CONTEXT")
@@ -452,6 +478,8 @@ def main() -> None:
     print(f"expired_no_pullback_or_unmeasurable={len(expired)}")
     print(f"entry_set_full_window={len(setups)}")
     print(f"news_proxy_excluded={excluded}")
+    print(f"gap_skipped_confluence={confluence_gap_skips}")
+    print(f"gap_skipped_baseline={baseline_gap_skips}")
     print(f"tick_measured_confluence_trades={len(confluence_trades)}")
     print(f"matched_baseline_trades={len(baseline_trades)}")
     print("rule: sweep + same-direction OB/FVG within <=10 bars and <=1.0*sweep_ATR price distance; OB bounds preferred if both exist")
