@@ -85,6 +85,8 @@ def load_log_source(path: Path) -> pd.DataFrame:
         "gross_r",
         "net_r_vs_020_spread",
         "realized_spread_or_slippage",
+        "real_spread_at_entry",
+        "real_spread_at_exit",
     ):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -96,6 +98,15 @@ def completed_trades(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "event" not in df.columns:
         return empty
     exits = df[df["event"].astype(str).str.lower() == "exit"].copy()
+    if exits.empty:
+        return empty
+    exits["gross_r"] = pd.to_numeric(exits.get("gross_r", pd.Series(dtype=float)), errors="coerce")
+    exits["net_r_vs_020_spread"] = pd.to_numeric(exits.get("net_r_vs_020_spread", pd.Series(dtype=float)), errors="coerce")
+    exits = exits[
+        exits["gross_r"].notna()
+        & exits["net_r_vs_020_spread"].notna()
+        & (exits.get("exit_reason", pd.Series(dtype=object)).astype(str).str.lower() != "unknown")
+    ].copy()
     if exits.empty:
         return empty
     entries = df[df["event"].astype(str).str.lower() == "entry"].copy()
@@ -120,7 +131,7 @@ def completed_trades(df: pd.DataFrame) -> pd.DataFrame:
     exits = exits.sort_values("timestamp_utc").reset_index(drop=True)
     exits["trade_number"] = range(1, len(exits) + 1)
     exits["net_r"] = exits.get("net_r_vs_020_spread", pd.Series(dtype=float))
-    exits["gross_r"] = exits.get("gross_r", pd.Series(dtype=float))
+    exits["gross_r"] = pd.to_numeric(exits.get("gross_r", pd.Series(dtype=float)), errors="coerce")
     exits["cum_r"] = exits["net_r"].fillna(0).cumsum()
     exits["equity_high"] = exits["cum_r"].cummax()
     exits["drawdown_r"] = exits["cum_r"] - exits["equity_high"]

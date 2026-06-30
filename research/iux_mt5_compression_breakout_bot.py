@@ -107,6 +107,7 @@ class ActiveTrade:
     range_low: float
     setup_time: datetime
     bars_elapsed: int = 0
+    reconstructed: bool = False
 
 
 def utc_from_timestamp(raw: int | float) -> datetime:
@@ -223,6 +224,9 @@ class CsvTradeLogger:
             "gross_r",
             "net_r_vs_020_spread",
             "realized_spread_or_slippage",
+            "real_spread_at_entry",
+            "real_spread_at_exit",
+            "is_intersection",
             "bars_held",
             "ticket",
             "notes",
@@ -252,6 +256,19 @@ class CsvTradeLogger:
         with self.path.open("a", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=self.fields)
             writer.writerow(row)
+
+    def read_rows(self) -> list[dict[str, str]]:
+        if not self.path.exists():
+            return []
+        with self.path.open(newline="") as handle:
+            return list(csv.DictReader(handle))
+
+    def rewrite_rows(self, rows: list[dict[str, object]]) -> None:
+        with self.path.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=self.fields)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({field: row.get(field, "") for field in self.fields})
 
 
 class Strategy:
@@ -297,6 +314,8 @@ class CompressionBreakoutStrategy(Strategy):
             pos = own_positions[0]
             already_active = self.active is not None and self.active.position_ticket == int(pos.ticket)
             direction = 1 if pos.type == mt5.POSITION_TYPE_BUY else -1
+            # Use the broker position open time, never the current/restart bar,
+            # when reconstructing state after a restart.
             entry_time = utc_from_timestamp(pos.time)
             entry_bar = self.find_bar_at_or_before(bars, entry_time) or bars[-1]
             if self.setup is not None:
@@ -306,11 +325,15 @@ class CompressionBreakoutStrategy(Strategy):
                 range_low = self.setup.range_low
                 setup_time = self.setup.setup_time
             else:
+                recovered = self.recover_setup_from_csv(int(pos.ticket), direction)
                 intended_entry = float(pos.price_open)
                 atr = abs(float(pos.price_open) - float(pos.sl)) if float(pos.sl) else (entry_bar.atr14 or bars[-1].atr14 or 0.0)
-                range_high = 0.0
-                range_low = 0.0
-                setup_time = entry_bar.time
+                range_high = recovered.range_high if recovered is not None else 0.0
+                range_low = recovered.range_low if recovered is not None else 0.0
+                setup_time = recovered.setup_time if recovered is not None else entry_bar.time
+                if recovered is not None:
+                    intended_entry = range_high if direction == 1 else range_low
+                    atr = recovered.atr_at_setup or atr
             self.active = ActiveTrade(
                 position_ticket=int(pos.ticket),
                 direction=direction,
@@ -325,9 +348,15 @@ class CompressionBreakoutStrategy(Strategy):
                 range_low=range_low,
                 setup_time=setup_time,
                 bars_elapsed=self.closed_bars_since(bars, entry_bar.time),
+                reconstructed=self.setup is None,
             )
             self.cancel_all_pending("reconcile_open_position")
             if not already_active:
+                print(
+                    "WARNING: reconstructed open position after startup/restart. "
+                    "Avoid restarting while a position is open; orphan-exit recovery will backfill if needed.",
+                    flush=True,
+                )
                 self.log_entry(self.active)
         else:
             self.active = None
@@ -338,6 +367,7 @@ class CompressionBreakoutStrategy(Strategy):
                 self.reconstruct_setup_from_orders(existing_orders, bars)
 
     def on_poll(self, bars: list[LiveBar]) -> None:
+        self.recover_orphaned_exits(bars)
         self.reconcile_exit_if_position_closed(bars)
         self.reconcile(bars)
         self.cancel_opposite_if_one_side_filled()
@@ -347,6 +377,7 @@ class CompressionBreakoutStrategy(Strategy):
             self.force_close_if_due(bars)
 
     def on_new_closed_bar(self, bars: list[LiveBar]) -> None:
+        self.recover_orphaned_exits(bars)
         self.reconcile_exit_if_position_closed(bars)
         self.reconcile(bars)
         if self.handle_session_flatten(bars):
@@ -613,6 +644,12 @@ class CompressionBreakoutStrategy(Strategy):
             return False
         return (now.hour, now.minute) >= (SESSION_FLATTEN_HOUR, SESSION_FLATTEN_MINUTE)
 
+    def current_real_spread(self) -> float | str:
+        tick = mt5.symbol_info_tick(self.symbol)
+        if tick is None:
+            return ""
+        return float(tick.ask) - float(tick.bid)
+
     def close_position(self, pos, reason: str, signal_time: str, note: str) -> None:
         tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
@@ -639,6 +676,7 @@ class CompressionBreakoutStrategy(Strategy):
             symbol=self.symbol,
             signal_time=signal_time,
             actual_fill_price=price,
+            real_spread_at_exit=self.current_real_spread(),
             ticket=int(pos.ticket),
             notes=f"{note}; result={result}",
         )
@@ -652,7 +690,7 @@ class CompressionBreakoutStrategy(Strategy):
         self.active = None
 
     def log_closed_trade(self, trade: ActiveTrade, bars: list[LiveBar]) -> None:
-        close_deal = self.find_closing_deal(trade)
+        close_deal, match_method = self.find_closing_deal(trade)
         if close_deal is None:
             exit_price: float | str = ""
             exit_time: datetime | str = ""
@@ -669,7 +707,7 @@ class CompressionBreakoutStrategy(Strategy):
             net_r = gross_r - BACKTEST_ROUNDTRIP_SPREAD / trade.atr_at_entry
             bars_held = self.closed_bars_since(bars, trade.entry_bar_time)
             notes = (
-                "closed position reconciled from MT5 history; "
+                f"closed position reconciled from MT5 history; match_method={match_method}; "
                 f"deal={getattr(close_deal, 'ticket', '')}; mt5_reason={getattr(close_deal, 'reason', '')}; "
                 f"comment={getattr(close_deal, 'comment', '')}"
             )
@@ -694,17 +732,20 @@ class CompressionBreakoutStrategy(Strategy):
             gross_r=gross_r,
             net_r_vs_020_spread=net_r,
             realized_spread_or_slippage=trade.direction * (trade.actual_entry - trade.intended_entry),
+            real_spread_at_exit=self.current_real_spread(),
+            is_intersection=False,
             bars_held=bars_held,
             ticket=trade.position_ticket,
             notes=notes,
         )
 
     def find_closing_deal(self, trade: ActiveTrade):
-        start = trade.entry_time - timedelta(days=2)
+        true_open_time = self.position_open_time_from_history(trade.position_ticket)
+        start = (true_open_time - timedelta(minutes=5)) if true_open_time is not None else (datetime.now(timezone.utc) - timedelta(days=30))
         end = datetime.now(timezone.utc) + timedelta(minutes=5)
         deals = mt5.history_deals_get(start, end)
         if deals is None:
-            return None
+            return None, "history_deals_get_none"
         out_entry_codes = {
             getattr(mt5, "DEAL_ENTRY_OUT", 1),
             getattr(mt5, "DEAL_ENTRY_INOUT", 2),
@@ -713,15 +754,210 @@ class CompressionBreakoutStrategy(Strategy):
             d for d in list(deals)
             if getattr(d, "symbol", "") == self.symbol
             and int(getattr(d, "entry", -1)) in out_entry_codes
-            and utc_from_timestamp(getattr(d, "time", 0)) >= trade.entry_time
+            and (true_open_time is None or utc_from_timestamp(getattr(d, "time", 0)) >= true_open_time)
         ]
+        # Broker-side TP/SL closes can have magic=0. The position_id is the
+        # reliable key, so it is primary and does not depend on magic.
         strict = [d for d in symbol_exits if int(getattr(d, "position_id", -1)) == trade.position_ticket]
-        magic = [d for d in symbol_exits if int(getattr(d, "magic", 0)) == self.magic]
-        candidates = strict or magic
+        if strict:
+            strict.sort(key=lambda d: int(getattr(d, "time", 0)))
+            return strict[-1], "position_id"
+        fallback = [
+            d for d in symbol_exits
+            if true_open_time is None or utc_from_timestamp(getattr(d, "time", 0)) >= true_open_time
+        ]
+        if fallback:
+            anchor = true_open_time or trade.entry_time
+            fallback.sort(key=lambda d: abs(int(getattr(d, "time", 0)) - int(anchor.timestamp())))
+            return fallback[0], "symbol_time_fallback"
+        return None, "no_match"
+
+    def position_open_time_from_history(self, position_ticket: int) -> Optional[datetime]:
+        start = datetime.now(timezone.utc) - timedelta(days=30)
+        end = datetime.now(timezone.utc) + timedelta(minutes=5)
+        deals = mt5.history_deals_get(start, end)
+        if deals is None:
+            return None
+        in_entry_codes = {getattr(mt5, "DEAL_ENTRY_IN", 0), getattr(mt5, "DEAL_ENTRY_INOUT", 2)}
+        candidates = [
+            d for d in list(deals)
+            if getattr(d, "symbol", "") == self.symbol
+            and int(getattr(d, "position_id", -1)) == position_ticket
+            and int(getattr(d, "entry", -1)) in in_entry_codes
+        ]
         if not candidates:
             return None
         candidates.sort(key=lambda d: int(getattr(d, "time", 0)))
-        return candidates[-1]
+        return utc_from_timestamp(getattr(candidates[0], "time", 0))
+
+    def recover_setup_from_csv(self, position_ticket: int, direction: int) -> Optional[CompressionSetup]:
+        rows = self.logger.read_rows()
+        for row in reversed(rows):
+            if str(row.get("ticket", "")) != str(position_ticket):
+                continue
+            if row.get("event", "").lower() not in {"entry", "exit"}:
+                continue
+            try:
+                range_high = float(row.get("range_high", "") or 0)
+                range_low = float(row.get("range_low", "") or 0)
+                atr = float(row.get("atr_at_entry", "") or 0)
+            except ValueError:
+                continue
+            if range_high > range_low > 0 and atr > 0:
+                setup_raw = row.get("setup_time") or row.get("signal_time") or row.get("timestamp_utc")
+                setup_time = datetime.fromisoformat(str(setup_raw).replace("Z", "+00:00"))
+                return CompressionSetup(setup_time, 0, range_high, range_low, atr)
+        open_order = self.opening_order_ticket(position_ticket)
+        if open_order is not None:
+            token = str(open_order)
+            for row in reversed(rows):
+                if row.get("event", "").lower() != "signal":
+                    continue
+                if token not in str(row.get("ticket", "")):
+                    continue
+                try:
+                    range_high = float(row.get("range_high", "") or 0)
+                    range_low = float(row.get("range_low", "") or 0)
+                    atr = float(row.get("atr_at_entry", "") or 0)
+                except ValueError:
+                    continue
+                if range_high > range_low > 0 and atr > 0:
+                    setup_raw = row.get("setup_time") or row.get("signal_time") or row.get("timestamp_utc")
+                    setup_time = datetime.fromisoformat(str(setup_raw).replace("Z", "+00:00"))
+                    return CompressionSetup(setup_time, 0, range_high, range_low, atr)
+        return None
+
+    def opening_order_ticket(self, position_ticket: int) -> Optional[int]:
+        start = datetime.now(timezone.utc) - timedelta(days=30)
+        end = datetime.now(timezone.utc) + timedelta(minutes=5)
+        deals = mt5.history_deals_get(start, end)
+        if deals is None:
+            return None
+        in_entry_codes = {getattr(mt5, "DEAL_ENTRY_IN", 0), getattr(mt5, "DEAL_ENTRY_INOUT", 2)}
+        candidates = [
+            d for d in list(deals)
+            if getattr(d, "symbol", "") == self.symbol
+            and int(getattr(d, "position_id", -1)) == position_ticket
+            and int(getattr(d, "entry", -1)) in in_entry_codes
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda d: int(getattr(d, "time", 0)))
+        return int(getattr(candidates[0], "order", 0) or 0) or None
+
+    def recover_orphaned_exits(self, bars: list[LiveBar]) -> None:
+        rows = self.logger.read_rows()
+        if not rows:
+            return
+        open_tickets = {str(int(p.ticket)) for p in self.own_positions()}
+        entry_by_ticket = {}
+        valid_exit_tickets = set()
+        bad_exit_tickets = set()
+        for row in rows:
+            ticket = str(row.get("ticket", "")).strip()
+            if not ticket:
+                continue
+            event = row.get("event", "").lower()
+            if event == "entry":
+                entry_by_ticket[ticket] = row
+            elif event == "exit":
+                has_r = row.get("gross_r") not in ("", None) and row.get("net_r_vs_020_spread") not in ("", None)
+                reason = str(row.get("exit_reason", "")).lower()
+                notes = str(row.get("notes", "")).lower()
+                if has_r and reason != "unknown" and "no closing deal found" not in notes:
+                    valid_exit_tickets.add(ticket)
+                else:
+                    bad_exit_tickets.add(ticket)
+        candidates = sorted((set(entry_by_ticket) - valid_exit_tickets) | bad_exit_tickets)
+        for ticket in candidates:
+            if ticket in open_tickets:
+                continue
+            try:
+                position_ticket = int(ticket)
+            except ValueError:
+                continue
+            recovered = self.recovered_exit_row(position_ticket, entry_by_ticket.get(ticket), bars)
+            if recovered is None:
+                continue
+            rows = [
+                row for row in rows
+                if not (str(row.get("ticket", "")).strip() == ticket and row.get("event", "").lower() == "exit")
+            ]
+            rows.append(recovered)
+            self.logger.rewrite_rows(rows)
+            print(f"Recovered orphaned exit for ticket={ticket}", flush=True)
+
+    def recovered_exit_row(self, position_ticket: int, entry_row: Optional[dict[str, str]], bars: list[LiveBar]) -> Optional[dict[str, object]]:
+        if entry_row is None:
+            return None
+        try:
+            direction = 1 if str(entry_row.get("breakout_direction", "")).lower() == "long" else -1
+            actual_entry = float(entry_row.get("actual_fill_price", "") or entry_row.get("intended_entry", ""))
+            intended_entry = float(entry_row.get("intended_entry", "") or actual_entry)
+            atr = float(entry_row.get("atr_at_entry", "") or 0)
+            sl = float(entry_row.get("sl", "") or 0)
+            tp = float(entry_row.get("tp", "") or 0)
+            range_high = float(entry_row.get("range_high", "") or 0)
+            range_low = float(entry_row.get("range_low", "") or 0)
+            setup_raw = entry_row.get("setup_time") or entry_row.get("signal_time") or entry_row.get("timestamp_utc")
+            signal_raw = entry_row.get("signal_time") or entry_row.get("timestamp_utc")
+            setup_time = datetime.fromisoformat(str(setup_raw).replace("Z", "+00:00"))
+            entry_bar_time = datetime.fromisoformat(str(signal_raw).replace("Z", "+00:00"))
+            entry_time_raw = entry_row.get("timestamp_utc") or signal_raw
+            entry_time = datetime.fromisoformat(str(entry_time_raw).replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if atr <= 0:
+            return None
+        trade = ActiveTrade(
+            position_ticket=position_ticket,
+            direction=direction,
+            entry_time=entry_time,
+            entry_bar_time=entry_bar_time,
+            intended_entry=intended_entry,
+            actual_entry=actual_entry,
+            atr_at_entry=atr,
+            sl=sl,
+            tp=tp,
+            range_high=range_high,
+            range_low=range_low,
+            setup_time=setup_time,
+        )
+        close_deal, match_method = self.find_closing_deal(trade)
+        if close_deal is None:
+            return None
+        exit_price = float(close_deal.price)
+        exit_time = utc_from_timestamp(getattr(close_deal, "time", int(datetime.now(timezone.utc).timestamp())))
+        gross_r = direction * (exit_price - actual_entry) / atr
+        net_r = gross_r - BACKTEST_ROUNDTRIP_SPREAD / atr
+        return {
+            "event": "exit",
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "strategy": self.name,
+            "magic": self.magic,
+            "symbol": self.symbol,
+            "signal_time": entry_bar_time.isoformat(),
+            "setup_time": setup_time.isoformat(),
+            "range_high": range_high,
+            "range_low": range_low,
+            "breakout_direction": "long" if direction == 1 else "short",
+            "intended_entry": intended_entry,
+            "actual_fill_price": actual_entry,
+            "sl": sl,
+            "tp": tp,
+            "atr_at_entry": atr,
+            "exit_price": exit_price,
+            "exit_time": exit_time.isoformat(),
+            "exit_reason": self.classify_exit_reason(trade, exit_price),
+            "gross_r": gross_r,
+            "net_r_vs_020_spread": net_r,
+            "realized_spread_or_slippage": direction * (actual_entry - intended_entry),
+            "real_spread_at_exit": "",
+            "is_intersection": False,
+            "bars_held": self.closed_bars_since(bars, entry_bar_time),
+            "ticket": position_ticket,
+            "notes": f"orphaned exit recovered from MT5 history; match_method={match_method}; deal={getattr(close_deal, 'ticket', '')}; mt5_reason={getattr(close_deal, 'reason', '')}; comment={getattr(close_deal, 'comment', '')}",
+        }
 
     def classify_exit_reason(self, trade: ActiveTrade, exit_price: float) -> str:
         tolerance = self.price_tolerance(trade)
@@ -764,8 +1000,13 @@ class CompressionBreakoutStrategy(Strategy):
             tp=trade.tp,
             atr_at_entry=trade.atr_at_entry,
             realized_spread_or_slippage=trade.direction * (trade.actual_entry - trade.intended_entry),
+            real_spread_at_entry=self.current_real_spread(),
+            is_intersection=False,
             ticket=trade.position_ticket,
-            notes="pending range-edge order filled; opposite pending cancelled",
+            notes=(
+                "pending range-edge order filled; opposite pending cancelled"
+                + ("; reconstructed after restart from open MT5 position" if trade.reconstructed else "")
+            ),
         )
 
     def find_bar_at_or_before(self, bars: list[LiveBar], ts: datetime) -> Optional[LiveBar]:
@@ -805,6 +1046,8 @@ class TradingBot:
                 if self.last_closed_bar_time is None:
                     self.last_closed_bar_time = closed_time
                     for strategy in self.strategies:
+                        if hasattr(strategy, "recover_orphaned_exits"):
+                            strategy.recover_orphaned_exits(bars)
                         strategy.reconcile(bars)
                     print(f"Initialized on last closed bar {closed_time.isoformat()}", flush=True)
                 elif closed_time > self.last_closed_bar_time:
