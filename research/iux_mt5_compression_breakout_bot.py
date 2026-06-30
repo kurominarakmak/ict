@@ -32,7 +32,7 @@ import os
 import signal
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import mean
 from typing import Optional
@@ -215,16 +215,33 @@ class CsvTradeLogger:
             "tp",
             "atr_at_entry",
             "exit_price",
+            "exit_time",
             "exit_reason",
             "gross_r",
             "net_r_vs_020_spread",
             "realized_spread_or_slippage",
+            "bars_held",
             "ticket",
             "notes",
         ]
-        if not self.path.exists():
+        if self.path.exists():
+            self.ensure_header_has_fields()
+        else:
             with self.path.open("w", newline="") as handle:
                 csv.DictWriter(handle, fieldnames=self.fields).writeheader()
+
+    def ensure_header_has_fields(self) -> None:
+        with self.path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            old_fields = reader.fieldnames or []
+            rows = list(reader)
+        if all(field in old_fields for field in self.fields):
+            return
+        with self.path.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=self.fields)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({field: row.get(field, "") for field in self.fields})
 
     def write(self, **kwargs: object) -> None:
         row = {field: kwargs.get(field, "") for field in self.fields}
@@ -347,6 +364,20 @@ class CompressionBreakoutStrategy(Strategy):
         range_low = min(b.low for b in window)
         if range_high <= range_low:
             return
+        if not self.market_is_open():
+            self.logger.write(
+                event="order_skip",
+                strategy=self.name,
+                magic=self.magic,
+                symbol=self.symbol,
+                signal_time=bars[i].time.isoformat(),
+                setup_time=bars[i].time.isoformat(),
+                range_high=range_high,
+                range_low=range_low,
+                atr_at_entry=atr,
+                notes="market closed or stale tick; pending range-edge orders not submitted",
+            )
+            return
         self.setup = CompressionSetup(
             setup_time=bars[i].time,
             setup_index=i,
@@ -376,6 +407,8 @@ class CompressionBreakoutStrategy(Strategy):
         )
 
     def place_pending(self, direction: int, entry: float, atr: float, setup: CompressionSetup) -> Optional[int]:
+        if not self.pending_stop_is_valid(direction, entry, setup):
+            return None
         order_type = mt5.ORDER_TYPE_BUY_STOP if direction == 1 else mt5.ORDER_TYPE_SELL_STOP
         sl = entry - direction * atr
         tp = entry + direction * self.rr * atr
@@ -396,8 +429,15 @@ class CompressionBreakoutStrategy(Strategy):
         result = mt5.order_send(request)
         ok_retcodes = {mt5.TRADE_RETCODE_DONE, getattr(mt5, "TRADE_RETCODE_PLACED", mt5.TRADE_RETCODE_DONE)}
         if result is None or result.retcode not in ok_retcodes:
+            retcode = getattr(result, "retcode", None)
+            if retcode == getattr(mt5, "TRADE_RETCODE_MARKET_CLOSED", 10018):
+                event = "order_skip"
+                note = f"market closed; pending order skipped quietly: {result}; last_error={mt5.last_error()}"
+            else:
+                event = "order_error"
+                note = f"pending order failed: {result}; last_error={mt5.last_error()}"
             self.logger.write(
-                event="order_error",
+                event=event,
                 strategy=self.name,
                 magic=self.magic,
                 symbol=self.symbol,
@@ -410,10 +450,70 @@ class CompressionBreakoutStrategy(Strategy):
                 sl=sl,
                 tp=tp,
                 atr_at_entry=atr,
-                notes=f"pending order failed: {result}; last_error={mt5.last_error()}",
+                notes=note,
             )
             return None
         return int(result.order)
+
+    def market_is_open(self) -> bool:
+        info = mt5.symbol_info(self.symbol)
+        if info is None:
+            return False
+        full_mode = getattr(mt5, "SYMBOL_TRADE_MODE_FULL", None)
+        if full_mode is not None and int(info.trade_mode) != int(full_mode):
+            return False
+        tick = mt5.symbol_info_tick(self.symbol)
+        if tick is None or not getattr(tick, "time", 0):
+            return False
+        tick_time = utc_from_timestamp(tick.time)
+        return (datetime.now(timezone.utc) - tick_time) <= timedelta(minutes=20)
+
+    def pending_stop_is_valid(self, direction: int, entry: float, setup: CompressionSetup) -> bool:
+        info = mt5.symbol_info(self.symbol)
+        tick = mt5.symbol_info_tick(self.symbol)
+        if info is None or tick is None:
+            self.log_order_skip(direction, entry, setup, "missing symbol info or tick; pending order skipped")
+            return False
+        point = float(getattr(info, "point", 0.0) or 0.0)
+        stops_level_points = float(getattr(info, "trade_stops_level", 0.0) or 0.0)
+        min_distance = stops_level_points * point
+        if direction == 1:
+            threshold = float(tick.ask) + min_distance
+            if entry <= threshold:
+                self.log_order_skip(
+                    direction,
+                    entry,
+                    setup,
+                    f"buy_stop invalid or missed: entry={entry} <= ask+stops={threshold}; price already too close/beyond edge",
+                )
+                return False
+        else:
+            threshold = float(tick.bid) - min_distance
+            if entry >= threshold:
+                self.log_order_skip(
+                    direction,
+                    entry,
+                    setup,
+                    f"sell_stop invalid or missed: entry={entry} >= bid-stops={threshold}; price already too close/beyond edge",
+                )
+                return False
+        return True
+
+    def log_order_skip(self, direction: int, entry: float, setup: CompressionSetup, note: str) -> None:
+        self.logger.write(
+            event="order_skip",
+            strategy=self.name,
+            magic=self.magic,
+            symbol=self.symbol,
+            signal_time=setup.setup_time.isoformat(),
+            setup_time=setup.setup_time.isoformat(),
+            range_high=setup.range_high,
+            range_low=setup.range_low,
+            breakout_direction="long" if direction == 1 else "short",
+            intended_entry=entry,
+            atr_at_entry=setup.atr_at_setup,
+            notes=note,
+        )
 
     def cancel_opposite_if_one_side_filled(self) -> None:
         if self.own_positions():
@@ -499,34 +599,27 @@ class CompressionBreakoutStrategy(Strategy):
         self.active = None
 
     def log_closed_trade(self, trade: ActiveTrade) -> None:
-        now = datetime.now(timezone.utc)
-        deals = mt5.history_deals_get(trade.entry_time, now)
-        own_deals = [
-            d for d in list(deals or [])
-            if int(getattr(d, "magic", 0)) == self.magic and getattr(d, "symbol", "") == self.symbol
-        ]
-        exit_deals = [
-            d for d in own_deals
-            if int(getattr(d, "position_id", 0)) == trade.position_ticket
-            and int(getattr(d, "entry", -1)) in (mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_INOUT)
-        ]
-        exit_price = float(exit_deals[-1].price) if exit_deals else ""
-        exit_reason = "unknown"
-        if exit_deals:
-            comment = str(getattr(exit_deals[-1], "comment", "")).lower()
-            reason_code = int(getattr(exit_deals[-1], "reason", -1))
-            if "force" in comment:
-                exit_reason = "force"
-            elif reason_code == getattr(mt5, "DEAL_REASON_TP", -999):
-                exit_reason = "tp"
-            elif reason_code == getattr(mt5, "DEAL_REASON_SL", -999):
-                exit_reason = "sl"
-        if isinstance(exit_price, float) and trade.atr_at_entry > 0:
+        close_deal = self.find_closing_deal(trade)
+        if close_deal is None:
+            exit_price: float | str = ""
+            exit_time: datetime | str = ""
+            exit_reason = "unknown"
+            gross_r: float | str = ""
+            net_r: float | str = ""
+            bars_held: int | str = ""
+            notes = "closed position detected but no closing deal found in MT5 history"
+        else:
+            exit_price = float(close_deal.price)
+            exit_time = utc_from_timestamp(getattr(close_deal, "time", int(datetime.now(timezone.utc).timestamp())))
+            exit_reason = self.classify_exit_reason(trade, exit_price)
             gross_r = trade.direction * (exit_price - trade.actual_entry) / trade.atr_at_entry
             net_r = gross_r - BACKTEST_ROUNDTRIP_SPREAD / trade.atr_at_entry
-        else:
-            gross_r = ""
-            net_r = ""
+            bars_held = self.bars_between_times(trade.entry_bar_time, exit_time)
+            notes = (
+                "closed position reconciled from MT5 history; "
+                f"deal={getattr(close_deal, 'ticket', '')}; mt5_reason={getattr(close_deal, 'reason', '')}; "
+                f"comment={getattr(close_deal, 'comment', '')}"
+            )
         self.logger.write(
             event="exit",
             strategy=self.name,
@@ -543,13 +636,63 @@ class CompressionBreakoutStrategy(Strategy):
             tp=trade.tp,
             atr_at_entry=trade.atr_at_entry,
             exit_price=exit_price,
+            exit_time=exit_time.isoformat() if isinstance(exit_time, datetime) else "",
             exit_reason=exit_reason,
             gross_r=gross_r,
             net_r_vs_020_spread=net_r,
             realized_spread_or_slippage=trade.direction * (trade.actual_entry - trade.intended_entry),
+            bars_held=bars_held,
             ticket=trade.position_ticket,
-            notes="closed position reconciled from MT5 history",
+            notes=notes,
         )
+
+    def find_closing_deal(self, trade: ActiveTrade):
+        start = trade.entry_time - timedelta(days=2)
+        end = datetime.now(timezone.utc) + timedelta(minutes=5)
+        deals = mt5.history_deals_get(start, end)
+        if deals is None:
+            return None
+        out_entry_codes = {
+            getattr(mt5, "DEAL_ENTRY_OUT", 1),
+            getattr(mt5, "DEAL_ENTRY_INOUT", 2),
+        }
+        symbol_exits = [
+            d for d in list(deals)
+            if getattr(d, "symbol", "") == self.symbol
+            and int(getattr(d, "entry", -1)) in out_entry_codes
+            and utc_from_timestamp(getattr(d, "time", 0)) >= trade.entry_time
+        ]
+        strict = [d for d in symbol_exits if int(getattr(d, "position_id", -1)) == trade.position_ticket]
+        magic = [d for d in symbol_exits if int(getattr(d, "magic", 0)) == self.magic]
+        candidates = strict or magic
+        if not candidates:
+            return None
+        candidates.sort(key=lambda d: int(getattr(d, "time", 0)))
+        return candidates[-1]
+
+    def classify_exit_reason(self, trade: ActiveTrade, exit_price: float) -> str:
+        tolerance = self.price_tolerance(trade)
+        if trade.direction == 1:
+            if exit_price >= trade.tp - tolerance:
+                return "target"
+            if exit_price <= trade.sl + tolerance:
+                return "stop"
+        else:
+            if exit_price <= trade.tp + tolerance:
+                return "target"
+            if exit_price >= trade.sl - tolerance:
+                return "stop"
+        return "force_close"
+
+    def price_tolerance(self, trade: ActiveTrade) -> float:
+        info = mt5.symbol_info(self.symbol)
+        point = float(getattr(info, "point", 0.01) or 0.01) if info is not None else 0.01
+        return max(point * 10, trade.atr_at_entry * 0.02)
+
+    def bars_between_times(self, start: datetime, end: datetime) -> int:
+        if end <= start:
+            return 0
+        return max(0, int((end.timestamp() - start.timestamp()) // TIMEFRAME_SECONDS))
 
     def log_entry(self, trade: ActiveTrade) -> None:
         self.logger.write(
