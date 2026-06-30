@@ -59,6 +59,9 @@ RR_TARGET = float(os.getenv("IUX_RR_TARGET", "1.5"))
 FORCE_CLOSE_BARS = int(os.getenv("IUX_FORCE_CLOSE_BARS", "10"))
 MAGIC_COMPRESSION = 1002
 BACKTEST_ROUNDTRIP_SPREAD = 0.20
+SESSION_FLATTEN_ENABLED = os.getenv("IUX_SESSION_FLATTEN", "1") != "0"
+SESSION_FLATTEN_HOUR = int(os.getenv("IUX_SESSION_FLATTEN_HOUR_UTC", "21"))
+SESSION_FLATTEN_MINUTE = int(os.getenv("IUX_SESSION_FLATTEN_MINUTE_UTC", "45"))
 
 POLL_SECONDS = int(os.getenv("IUX_POLL_SECONDS", "5"))
 MAX_DEVIATION_POINTS = int(os.getenv("IUX_DEVIATION_POINTS", "50"))
@@ -335,15 +338,19 @@ class CompressionBreakoutStrategy(Strategy):
                 self.reconstruct_setup_from_orders(existing_orders, bars)
 
     def on_poll(self, bars: list[LiveBar]) -> None:
-        self.reconcile_exit_if_position_closed()
+        self.reconcile_exit_if_position_closed(bars)
         self.reconcile(bars)
         self.cancel_opposite_if_one_side_filled()
+        if self.handle_session_flatten(bars):
+            return
         if self.active is not None:
             self.force_close_if_due(bars)
 
     def on_new_closed_bar(self, bars: list[LiveBar]) -> None:
-        self.reconcile_exit_if_position_closed()
+        self.reconcile_exit_if_position_closed(bars)
         self.reconcile(bars)
+        if self.handle_session_flatten(bars):
+            return
         if self.active is not None:
             self.force_close_if_due(bars)
             return
@@ -363,6 +370,20 @@ class CompressionBreakoutStrategy(Strategy):
         range_high = max(b.high for b in window)
         range_low = min(b.low for b in window)
         if range_high <= range_low:
+            return
+        if self.is_session_flatten_window():
+            self.logger.write(
+                event="order_skip",
+                strategy=self.name,
+                magic=self.magic,
+                symbol=self.symbol,
+                signal_time=bars[i].time.isoformat(),
+                setup_time=bars[i].time.isoformat(),
+                range_high=range_high,
+                range_low=range_low,
+                atr_at_entry=atr,
+                notes="session flatten window; no new pending orders submitted",
+            )
             return
         if not self.market_is_open():
             self.logger.write(
@@ -561,6 +582,38 @@ class CompressionBreakoutStrategy(Strategy):
         pos = next((p for p in self.own_positions() if int(p.ticket) == self.active.position_ticket), None)
         if pos is None:
             return
+        self.close_position(pos, "force_close", bars[-1].time.isoformat(), f"elapsed_closed_bars={elapsed}")
+
+    def handle_session_flatten(self, bars: list[LiveBar]) -> bool:
+        if not self.is_session_flatten_window():
+            return False
+        if self.own_orders():
+            self.cancel_all_pending("session_flatten_cancel_pending")
+            self.logger.write(
+                event="order_skip",
+                strategy=self.name,
+                magic=self.magic,
+                symbol=self.symbol,
+                signal_time=bars[-1].time.isoformat(),
+                notes="session flatten window; pending compression orders cancelled before market gap",
+            )
+        if self.active is None:
+            return True
+        pos = next((p for p in self.own_positions() if int(p.ticket) == self.active.position_ticket), None)
+        if pos is None:
+            return True
+        self.close_position(pos, "session_flatten", bars[-1].time.isoformat(), "pre-session-gap flatten to match backtest and avoid unmanaged gap risk")
+        return True
+
+    def is_session_flatten_window(self) -> bool:
+        if not SESSION_FLATTEN_ENABLED:
+            return False
+        now = datetime.now(timezone.utc)
+        if now.weekday() > 4:
+            return False
+        return (now.hour, now.minute) >= (SESSION_FLATTEN_HOUR, SESSION_FLATTEN_MINUTE)
+
+    def close_position(self, pos, reason: str, signal_time: str, note: str) -> None:
         tick = mt5.symbol_info_tick(self.symbol)
         if tick is None:
             return
@@ -575,7 +628,7 @@ class CompressionBreakoutStrategy(Strategy):
             "price": self.normalize_price(price),
             "deviation": MAX_DEVIATION_POINTS,
             "magic": self.magic,
-            "comment": "force_close",
+            "comment": reason,
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
         result = mt5.order_send(request)
@@ -584,21 +637,21 @@ class CompressionBreakoutStrategy(Strategy):
             strategy=self.name,
             magic=self.magic,
             symbol=self.symbol,
-            signal_time=bars[-1].time.isoformat(),
+            signal_time=signal_time,
             actual_fill_price=price,
             ticket=int(pos.ticket),
-            notes=f"elapsed_closed_bars={elapsed}; result={result}",
+            notes=f"{note}; result={result}",
         )
 
-    def reconcile_exit_if_position_closed(self) -> None:
+    def reconcile_exit_if_position_closed(self, bars: list[LiveBar]) -> None:
         if self.active is None:
             return
         if any(int(p.ticket) == self.active.position_ticket for p in self.own_positions()):
             return
-        self.log_closed_trade(self.active)
+        self.log_closed_trade(self.active, bars)
         self.active = None
 
-    def log_closed_trade(self, trade: ActiveTrade) -> None:
+    def log_closed_trade(self, trade: ActiveTrade, bars: list[LiveBar]) -> None:
         close_deal = self.find_closing_deal(trade)
         if close_deal is None:
             exit_price: float | str = ""
@@ -614,7 +667,7 @@ class CompressionBreakoutStrategy(Strategy):
             exit_reason = self.classify_exit_reason(trade, exit_price)
             gross_r = trade.direction * (exit_price - trade.actual_entry) / trade.atr_at_entry
             net_r = gross_r - BACKTEST_ROUNDTRIP_SPREAD / trade.atr_at_entry
-            bars_held = self.bars_between_times(trade.entry_bar_time, exit_time)
+            bars_held = self.closed_bars_since(bars, trade.entry_bar_time)
             notes = (
                 "closed position reconciled from MT5 history; "
                 f"deal={getattr(close_deal, 'ticket', '')}; mt5_reason={getattr(close_deal, 'reason', '')}; "
