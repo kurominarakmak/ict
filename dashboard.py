@@ -263,6 +263,14 @@ def ci_badge(summary: MetricSummary) -> str:
 
 def alert_messages(trades: pd.DataFrame, expectancy: MetricSummary, win_rate: float, avg_spread_proxy: float, health: dict[str, object]) -> list[tuple[str, str]]:
     alerts: list[tuple[str, str]] = []
+    raw = health.get("raw_log")
+    if isinstance(raw, pd.DataFrame) and not raw.empty and "event" in raw.columns:
+        failed_closes = raw[raw["event"].astype(str).eq("close_failed_critical")]
+        if not failed_closes.empty:
+            latest = failed_closes.iloc[-1]
+            ticket = latest.get("ticket", "")
+            notes = str(latest.get("notes", ""))
+            alerts.append(("error", f"CLOSE FAILED - position may still be open. ticket={ticket}. {notes[:240]}"))
     n = expectancy.n
     if health["stale"]:
         alerts.append(("error", f"Bot/log appears stale: last log {health['minutes_since_log']:.1f} minutes ago."))
@@ -291,6 +299,7 @@ def main() -> None:
     df = load_log_source(log_path)
     trades = completed_trades(df)
     health = infer_health(df, trades)
+    health["raw_log"] = df
     expectancy = summarize(trades.get("net_r", pd.Series(dtype=float)))
     win_rate = float((trades["net_r"] > 0).mean()) if not trades.empty and "net_r" in trades.columns else math.nan
     pf = profit_factor(trades)

@@ -65,6 +65,9 @@ SESSION_FLATTEN_MINUTE = int(os.getenv("IUX_SESSION_FLATTEN_MINUTE_UTC", "45"))
 
 POLL_SECONDS = int(os.getenv("IUX_POLL_SECONDS", "5"))
 MAX_DEVIATION_POINTS = int(os.getenv("IUX_DEVIATION_POINTS", "50"))
+CLOSE_MAX_ATTEMPTS = int(os.getenv("IUX_CLOSE_MAX_ATTEMPTS", "5"))
+CLOSE_VERIFY_POLLS = int(os.getenv("IUX_CLOSE_VERIFY_POLLS", "5"))
+CLOSE_VERIFY_SLEEP_SECONDS = float(os.getenv("IUX_CLOSE_VERIFY_SLEEP_SECONDS", "0.5"))
 LOG_PATH = Path(os.getenv("IUX_COMPRESSION_LOG", "research/iux_compression_breakout_live_log.csv"))
 
 ORDER_COMMENT = "compression_breakout"
@@ -297,12 +300,16 @@ class CompressionBreakoutStrategy(Strategy):
         self.logger = logger
         self.setup: Optional[CompressionSetup] = None
         self.active: Optional[ActiveTrade] = None
+        self.close_fail_alerted: set[tuple[int, str]] = set()
 
     def positions(self):
         return list(mt5.positions_get(symbol=self.symbol) or [])
 
     def own_positions(self):
         return [p for p in self.positions() if int(p.magic) == self.magic]
+
+    def position_is_open(self, ticket: int) -> bool:
+        return any(int(p.ticket) == int(ticket) for p in self.positions())
 
     def own_orders(self):
         orders = list(mt5.orders_get(symbol=self.symbol) or [])
@@ -650,36 +657,130 @@ class CompressionBreakoutStrategy(Strategy):
             return ""
         return float(tick.ask) - float(tick.bid)
 
-    def close_position(self, pos, reason: str, signal_time: str, note: str) -> None:
-        tick = mt5.symbol_info_tick(self.symbol)
-        if tick is None:
+    def close_filling_candidates(self) -> list[int]:
+        info = mt5.symbol_info(self.symbol)
+        candidates: list[int] = []
+        # IUX accepts RETURN for the working pending orders. Prefer it for
+        # market closes too; IOC caused repeated retcode=10030 failures.
+        if getattr(mt5, "ORDER_FILLING_RETURN", None) is not None:
+            candidates.append(int(mt5.ORDER_FILLING_RETURN))
+        if info is not None:
+            raw_mode = getattr(info, "filling_mode", None)
+            if raw_mode is not None:
+                try:
+                    candidates.append(int(raw_mode))
+                except (TypeError, ValueError):
+                    pass
+        for mode in (
+            getattr(mt5, "ORDER_FILLING_FOK", None),
+            getattr(mt5, "ORDER_FILLING_IOC", None),
+        ):
+            if mode is not None:
+                candidates.append(int(mode))
+        out: list[int] = []
+        for mode in candidates:
+            if mode not in out:
+                out.append(mode)
+        return out
+
+    def verify_position_closed(self, ticket: int) -> bool:
+        for _ in range(CLOSE_VERIFY_POLLS):
+            if not self.position_is_open(ticket):
+                return True
+            time.sleep(CLOSE_VERIFY_SLEEP_SECONDS)
+        return not self.position_is_open(ticket)
+
+    def log_close_failed_once(self, pos, reason: str, signal_time: str, note: str, attempts: list[str]) -> None:
+        ticket = int(pos.ticket)
+        key = (ticket, reason)
+        if key in self.close_fail_alerted:
             return
-        close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
-        price = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": self.symbol,
-            "volume": float(pos.volume),
-            "type": close_type,
-            "position": int(pos.ticket),
-            "price": self.normalize_price(price),
-            "deviation": MAX_DEVIATION_POINTS,
-            "magic": self.magic,
-            "comment": reason,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
-        result = mt5.order_send(request)
+        self.close_fail_alerted.add(key)
+        broker_sl = float(getattr(pos, "sl", 0.0) or 0.0)
+        broker_tp = float(getattr(pos, "tp", 0.0) or 0.0)
+        fallback = (
+            f"broker_sl={broker_sl:.2f};"
+            f"broker_tp={broker_tp:.2f};"
+            f"broker_side_sl_tp_remain_active={broker_sl > 0 and broker_tp > 0}"
+        )
         self.logger.write(
-            event="force_close_sent",
+            event="close_failed_critical",
             strategy=self.name,
             magic=self.magic,
             symbol=self.symbol,
             signal_time=signal_time,
-            actual_fill_price=price,
+            actual_fill_price=float(getattr(pos, "price_current", 0.0) or 0.0),
             real_spread_at_exit=self.current_real_spread(),
-            ticket=int(pos.ticket),
-            notes=f"{note}; result={result}",
+            ticket=ticket,
+            notes=(
+                "CLOSE FAILED - position still open after bounded retries; "
+                f"reason={reason}; {note}; attempts={attempts}; last_error={mt5.last_error()}; {fallback}"
+            ),
         )
+
+    def close_position(self, pos, reason: str, signal_time: str, note: str) -> None:
+        ticket = int(pos.ticket)
+        if (ticket, reason) in self.close_fail_alerted:
+            return
+        close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        filling_modes = self.close_filling_candidates()
+        attempts: list[str] = []
+        ok_retcodes = {
+            mt5.TRADE_RETCODE_DONE,
+            getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", mt5.TRADE_RETCODE_DONE),
+        }
+        for attempt in range(1, CLOSE_MAX_ATTEMPTS + 1):
+            tick = mt5.symbol_info_tick(self.symbol)
+            if tick is None:
+                attempts.append(f"attempt={attempt}; no symbol tick; last_error={mt5.last_error()}")
+                time.sleep(CLOSE_VERIFY_SLEEP_SECONDS)
+                continue
+            price = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
+            filling_mode = filling_modes[min(attempt - 1, len(filling_modes) - 1)] if filling_modes else mt5.ORDER_FILLING_RETURN
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": self.symbol,
+                "volume": float(pos.volume),
+                "type": close_type,
+                "position": ticket,
+                "price": self.normalize_price(price),
+                "deviation": MAX_DEVIATION_POINTS,
+                "magic": self.magic,
+                "comment": reason,
+                "type_filling": filling_mode,
+            }
+            result = mt5.order_send(request)
+            retcode = getattr(result, "retcode", None)
+            attempts.append(f"attempt={attempt}; filling={filling_mode}; price={price}; retcode={retcode}; result={result}")
+            if result is not None and retcode in ok_retcodes and self.verify_position_closed(ticket):
+                self.close_fail_alerted.discard((ticket, reason))
+                self.logger.write(
+                    event="force_close_sent",
+                    strategy=self.name,
+                    magic=self.magic,
+                    symbol=self.symbol,
+                    signal_time=signal_time,
+                    actual_fill_price=price,
+                    real_spread_at_exit=self.current_real_spread(),
+                    ticket=ticket,
+                    notes=f"{note}; close verified; attempts={attempts}",
+                )
+                return
+            time.sleep(CLOSE_VERIFY_SLEEP_SECONDS)
+        if self.verify_position_closed(ticket):
+            self.logger.write(
+                event="force_close_sent",
+                strategy=self.name,
+                magic=self.magic,
+                symbol=self.symbol,
+                signal_time=signal_time,
+                actual_fill_price=float(getattr(pos, "price_current", 0.0) or 0.0),
+                real_spread_at_exit=self.current_real_spread(),
+                ticket=ticket,
+                notes=f"{note}; position closed after retry loop verification; attempts={attempts}",
+            )
+            return
+        self.log_close_failed_once(pos, reason, signal_time, note, attempts)
 
     def reconcile_exit_if_position_closed(self, bars: list[LiveBar]) -> None:
         if self.active is None:
