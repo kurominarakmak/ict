@@ -42,6 +42,11 @@ TRADE_COLUMNS = [
     "gross_r",
     "net_r",
     "net_r_vs_020_spread",
+    "net_r_realized",
+    "total_fill_diff",
+    "spread_component_at_entry",
+    "pure_slippage",
+    "estimated_roundtrip_spread",
     "realized_spread_or_slippage",
     "entry_slippage",
     "trade_number",
@@ -84,6 +89,11 @@ def load_log_source(path: Path) -> pd.DataFrame:
         "exit_price",
         "gross_r",
         "net_r_vs_020_spread",
+        "net_r_realized",
+        "total_fill_diff",
+        "spread_component_at_entry",
+        "pure_slippage",
+        "estimated_roundtrip_spread",
         "realized_spread_or_slippage",
         "real_spread_at_entry",
         "real_spread_at_exit",
@@ -116,6 +126,10 @@ def completed_trades(df: pd.DataFrame) -> pd.DataFrame:
             "actual_fill_price",
             "intended_entry",
             "realized_spread_or_slippage",
+            "total_fill_diff",
+            "spread_component_at_entry",
+            "pure_slippage",
+            "real_spread_at_entry",
             "timestamp_utc",
         ]
         entry_cols = [c for c in entry_cols if c in entries.columns]
@@ -124,6 +138,9 @@ def completed_trades(df: pd.DataFrame) -> pd.DataFrame:
                 "actual_fill_price": "entry_fill_price",
                 "intended_entry": "entry_intended_price",
                 "realized_spread_or_slippage": "entry_slippage",
+                "total_fill_diff": "entry_total_fill_diff",
+                "spread_component_at_entry": "entry_spread_component",
+                "pure_slippage": "entry_pure_slippage",
                 "timestamp_utc": "entry_logged_at",
             }
         )
@@ -324,7 +341,10 @@ def main() -> None:
     st.caption("MT5 connection status is only visible if the bot writes log/heartbeat rows; current dashboard infers health from CSV freshness.")
 
     st.subheader("Divergence Alerts")
-    avg_slip_proxy = float(trades["realized_spread_or_slippage"].abs().mean()) if "realized_spread_or_slippage" in trades and not trades.empty else math.nan
+    if "entry_pure_slippage" in trades and not trades.empty:
+        avg_slip_proxy = float(trades["entry_pure_slippage"].abs().mean())
+    else:
+        avg_slip_proxy = float(trades["realized_spread_or_slippage"].abs().mean()) if "realized_spread_or_slippage" in trades and not trades.empty else math.nan
     for kind, msg in alert_messages(trades, expectancy, win_rate, avg_slip_proxy, health):
         getattr(st, kind)(msg)
 
@@ -397,6 +417,11 @@ def main() -> None:
             "exit_reason",
             "gross_r",
             "net_r",
+            "net_r_realized",
+            "entry_total_fill_diff",
+            "entry_spread_component",
+            "entry_pure_slippage",
+            "estimated_roundtrip_spread",
             "cum_r",
             "drawdown_r",
         ]

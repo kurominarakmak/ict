@@ -109,6 +109,7 @@ class ActiveTrade:
     range_high: float
     range_low: float
     setup_time: datetime
+    real_spread_at_entry: float | str = ""
     bars_elapsed: int = 0
     reconstructed: bool = False
 
@@ -218,6 +219,9 @@ class CsvTradeLogger:
             "breakout_direction",
             "intended_entry",
             "actual_fill_price",
+            "total_fill_diff",
+            "spread_component_at_entry",
+            "pure_slippage",
             "sl",
             "tp",
             "atr_at_entry",
@@ -226,6 +230,8 @@ class CsvTradeLogger:
             "exit_reason",
             "gross_r",
             "net_r_vs_020_spread",
+            "net_r_realized",
+            "estimated_roundtrip_spread",
             "realized_spread_or_slippage",
             "real_spread_at_entry",
             "real_spread_at_exit",
@@ -354,6 +360,7 @@ class CompressionBreakoutStrategy(Strategy):
                 range_high=range_high,
                 range_low=range_low,
                 setup_time=setup_time,
+                real_spread_at_entry=self.current_real_spread(),
                 bars_elapsed=self.closed_bars_since(bars, entry_bar.time),
                 reconstructed=self.setup is None,
             )
@@ -657,6 +664,35 @@ class CompressionBreakoutStrategy(Strategy):
             return ""
         return float(tick.ask) - float(tick.bid)
 
+    def fill_cost_fields(
+        self,
+        direction: int,
+        intended_entry: float,
+        actual_entry: float,
+        entry_spread: float | str,
+        exit_spread: float | str = "",
+    ) -> dict[str, float | str]:
+        total_fill_diff = direction * (actual_entry - intended_entry)
+        # MT5 copy_rates bars are bid-side bars. A buy stop at the bid-bar
+        # range high fills on ask, so the entry fill diff contains the full
+        # entry spread. A sell stop fills on bid, so its entry fill diff does
+        # not include entry spread.
+        spread_component = 0.0
+        if direction == 1 and isinstance(entry_spread, (int, float)) and math.isfinite(float(entry_spread)):
+            spread_component = float(entry_spread)
+        pure_slippage = total_fill_diff - spread_component
+        estimated_roundtrip: float | str = ""
+        if isinstance(entry_spread, (int, float)) and math.isfinite(float(entry_spread)):
+            estimated_roundtrip = float(entry_spread)
+            if isinstance(exit_spread, (int, float)) and math.isfinite(float(exit_spread)):
+                estimated_roundtrip += float(exit_spread)
+        return {
+            "total_fill_diff": total_fill_diff,
+            "spread_component_at_entry": spread_component,
+            "pure_slippage": pure_slippage,
+            "estimated_roundtrip_spread": estimated_roundtrip,
+        }
+
     def close_filling_candidates(self) -> list[int]:
         info = mt5.symbol_info(self.symbol)
         candidates: list[int] = []
@@ -792,12 +828,21 @@ class CompressionBreakoutStrategy(Strategy):
 
     def log_closed_trade(self, trade: ActiveTrade, bars: list[LiveBar]) -> None:
         close_deal, match_method = self.find_closing_deal(trade)
+        exit_spread = self.current_real_spread()
+        cost_fields = self.fill_cost_fields(
+            trade.direction,
+            trade.intended_entry,
+            trade.actual_entry,
+            trade.real_spread_at_entry,
+            exit_spread,
+        )
         if close_deal is None:
             exit_price: float | str = ""
             exit_time: datetime | str = ""
             exit_reason = "unknown"
             gross_r: float | str = ""
             net_r: float | str = ""
+            net_r_realized: float | str = ""
             bars_held: int | str = ""
             notes = "closed position detected but no closing deal found in MT5 history"
         else:
@@ -806,6 +851,10 @@ class CompressionBreakoutStrategy(Strategy):
             exit_reason = self.classify_exit_reason(trade, exit_price)
             gross_r = trade.direction * (exit_price - trade.actual_entry) / trade.atr_at_entry
             net_r = gross_r - BACKTEST_ROUNDTRIP_SPREAD / trade.atr_at_entry
+            # gross_r is computed from actual broker fill prices, so it already
+            # includes live bid/ask spread and execution slippage. This is the
+            # corrected realized live R before commissions/swaps.
+            net_r_realized = gross_r
             bars_held = self.closed_bars_since(bars, trade.entry_bar_time)
             notes = (
                 f"closed position reconciled from MT5 history; match_method={match_method}; "
@@ -824,6 +873,9 @@ class CompressionBreakoutStrategy(Strategy):
             breakout_direction="long" if trade.direction == 1 else "short",
             intended_entry=trade.intended_entry,
             actual_fill_price=trade.actual_entry,
+            total_fill_diff=cost_fields["total_fill_diff"],
+            spread_component_at_entry=cost_fields["spread_component_at_entry"],
+            pure_slippage=cost_fields["pure_slippage"],
             sl=trade.sl,
             tp=trade.tp,
             atr_at_entry=trade.atr_at_entry,
@@ -832,8 +884,10 @@ class CompressionBreakoutStrategy(Strategy):
             exit_reason=exit_reason,
             gross_r=gross_r,
             net_r_vs_020_spread=net_r,
+            net_r_realized=net_r_realized,
+            estimated_roundtrip_spread=cost_fields["estimated_roundtrip_spread"],
             realized_spread_or_slippage=trade.direction * (trade.actual_entry - trade.intended_entry),
-            real_spread_at_exit=self.current_real_spread(),
+            real_spread_at_exit=exit_spread,
             is_intersection=False,
             bars_held=bars_held,
             ticket=trade.position_ticket,
@@ -1000,6 +1054,10 @@ class CompressionBreakoutStrategy(Strategy):
             tp = float(entry_row.get("tp", "") or 0)
             range_high = float(entry_row.get("range_high", "") or 0)
             range_low = float(entry_row.get("range_low", "") or 0)
+            real_spread_at_entry: float | str = ""
+            raw_entry_spread = entry_row.get("real_spread_at_entry", "")
+            if raw_entry_spread not in ("", None):
+                real_spread_at_entry = float(raw_entry_spread)
             setup_raw = entry_row.get("setup_time") or entry_row.get("signal_time") or entry_row.get("timestamp_utc")
             signal_raw = entry_row.get("signal_time") or entry_row.get("timestamp_utc")
             setup_time = datetime.fromisoformat(str(setup_raw).replace("Z", "+00:00"))
@@ -1023,6 +1081,7 @@ class CompressionBreakoutStrategy(Strategy):
             range_high=range_high,
             range_low=range_low,
             setup_time=setup_time,
+            real_spread_at_entry=real_spread_at_entry,
         )
         close_deal, match_method = self.find_closing_deal(trade)
         if close_deal is None:
@@ -1031,6 +1090,8 @@ class CompressionBreakoutStrategy(Strategy):
         exit_time = utc_from_timestamp(getattr(close_deal, "time", int(datetime.now(timezone.utc).timestamp())))
         gross_r = direction * (exit_price - actual_entry) / atr
         net_r = gross_r - BACKTEST_ROUNDTRIP_SPREAD / atr
+        exit_spread = ""
+        cost_fields = self.fill_cost_fields(direction, intended_entry, actual_entry, real_spread_at_entry, exit_spread)
         return {
             "event": "exit",
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -1044,6 +1105,9 @@ class CompressionBreakoutStrategy(Strategy):
             "breakout_direction": "long" if direction == 1 else "short",
             "intended_entry": intended_entry,
             "actual_fill_price": actual_entry,
+            "total_fill_diff": cost_fields["total_fill_diff"],
+            "spread_component_at_entry": cost_fields["spread_component_at_entry"],
+            "pure_slippage": cost_fields["pure_slippage"],
             "sl": sl,
             "tp": tp,
             "atr_at_entry": atr,
@@ -1052,6 +1116,8 @@ class CompressionBreakoutStrategy(Strategy):
             "exit_reason": self.classify_exit_reason(trade, exit_price),
             "gross_r": gross_r,
             "net_r_vs_020_spread": net_r,
+            "net_r_realized": gross_r,
+            "estimated_roundtrip_spread": cost_fields["estimated_roundtrip_spread"],
             "realized_spread_or_slippage": direction * (actual_entry - intended_entry),
             "real_spread_at_exit": "",
             "is_intersection": False,
@@ -1085,6 +1151,15 @@ class CompressionBreakoutStrategy(Strategy):
         return max(0, int((end.timestamp() - start.timestamp()) // TIMEFRAME_SECONDS))
 
     def log_entry(self, trade: ActiveTrade) -> None:
+        entry_spread = trade.real_spread_at_entry
+        if entry_spread == "":
+            entry_spread = self.current_real_spread()
+        cost_fields = self.fill_cost_fields(
+            trade.direction,
+            trade.intended_entry,
+            trade.actual_entry,
+            entry_spread,
+        )
         self.logger.write(
             event="entry",
             strategy=self.name,
@@ -1097,11 +1172,15 @@ class CompressionBreakoutStrategy(Strategy):
             breakout_direction="long" if trade.direction == 1 else "short",
             intended_entry=trade.intended_entry,
             actual_fill_price=trade.actual_entry,
+            total_fill_diff=cost_fields["total_fill_diff"],
+            spread_component_at_entry=cost_fields["spread_component_at_entry"],
+            pure_slippage=cost_fields["pure_slippage"],
             sl=trade.sl,
             tp=trade.tp,
             atr_at_entry=trade.atr_at_entry,
             realized_spread_or_slippage=trade.direction * (trade.actual_entry - trade.intended_entry),
-            real_spread_at_entry=self.current_real_spread(),
+            real_spread_at_entry=entry_spread,
+            estimated_roundtrip_spread=cost_fields["estimated_roundtrip_spread"],
             is_intersection=False,
             ticket=trade.position_ticket,
             notes=(
