@@ -257,14 +257,18 @@ def replay_bot_logic(
     signals: dict[int, Signal],
     stops_level_usd: float,
     *,
-    rearm: bool = True,
+    rearm: bool = False,
 ) -> tuple[list[ReplayTrade], dict[str, int]]:
     trades: list[ReplayTrade] = []
     stats = {
         "signals": len(signals),
         "signals_blocked_by_flatten": 0,
         "signals_no_valid_pending": 0,
+        "signals_flat_no_pending": 0,
+        "signals_while_pending_skipped": 0,
+        "signals_while_active_skipped": 0,
         "side_skips": 0,
+        "oco_armed": 0,
         "replaced_pending_sets": 0,
     }
     pending: Signal | None = None
@@ -362,6 +366,8 @@ def replay_bot_logic(
 
         signal = signals.get(i)
         if active is not None:
+            if signal is not None:
+                stats["signals_while_active_skipped"] += 1
             continue
         if is_flatten_time(bar.start):
             if signal is not None:
@@ -373,8 +379,15 @@ def replay_bot_logic(
         if signal is not None:
             if pending is not None:
                 if not rearm:
+                    # Mirrors live bot on_new_closed_bar:
+                    # if self.own_orders(): self.cancel_opposite_if_one_side_filled(); return
+                    # Existing pendings are kept until fill, cancel, or flatten; new signals do
+                    # not replace/re-arm them.
+                    stats["signals_while_pending_skipped"] += 1
                     continue
                 stats["replaced_pending_sets"] += 1
+            else:
+                stats["signals_flat_no_pending"] += 1
             buy_valid = pending_valid(1, signal.range_high, bar, stops_level_usd)
             sell_valid = pending_valid(-1, signal.range_low, bar, stops_level_usd)
             stats["side_skips"] += int(not buy_valid) + int(not sell_valid)
@@ -385,6 +398,7 @@ def replay_bot_logic(
             pending = signal
             pending_buy_valid = buy_valid
             pending_sell_valid = sell_valid
+            stats["oco_armed"] += 1
     return trades, stats
 
 
@@ -713,9 +727,10 @@ def append_registry_01b(
             f"golden gate {golden.status} (match_pct={fmt(golden.match_pct, 4)})."
         )
     else:
+        case = "CASE_A_HARNESS_BUG_FIXED" if pass_gate else "CASE_B_GUARDED_REPLAY_STILL_DIVERGES"
         result = (
             "- 2026-07-02: V-2026-PARITY-01B result: "
-            f"{'PASS' if pass_gate else 'FAIL'}; golden_match_pct={fmt(golden.match_pct, 4)}; "
+            f"{'PASS' if pass_gate else 'FAIL'} ({case}); golden_match_pct={fmt(golden.match_pct, 4)}; "
             f"bot_logic_train={bot_train['net']:.4f} [{bot_train['lo']:.4f},{bot_train['hi']:.4f}], "
             f"test={bot_test['net']:.4f} [{bot_test['lo']:.4f},{bot_test['hi']:.4f}]."
         )
@@ -780,10 +795,10 @@ def main() -> None:
     research_only = research_signal_set - bot_signal_set
 
     research_rows = research_trades(bars)
-    bot_rows_0, stats_0 = replay_bot_logic(bars, bot_signal_map, args.stops_level_usd, rearm=True)
-    bot_rows_real, stats_real = replay_bot_logic(bars, bot_signal_map, args.realistic_stops_level_usd, rearm=True)
-    bot_rows_freeze, stats_freeze = replay_bot_logic(bars, bot_signal_map, args.stops_level_usd, rearm=False)
-    research_signal_rows, research_signal_stats = replay_bot_logic(bars, research_style_signal_map, args.stops_level_usd, rearm=True)
+    bot_rows_0, stats_0 = replay_bot_logic(bars, bot_signal_map, args.stops_level_usd, rearm=False)
+    bot_rows_real, stats_real = replay_bot_logic(bars, bot_signal_map, args.realistic_stops_level_usd, rearm=False)
+    bot_rows_replace, stats_replace = replay_bot_logic(bars, bot_signal_map, args.stops_level_usd, rearm=True)
+    research_signal_rows, research_signal_stats = replay_bot_logic(bars, research_style_signal_map, args.stops_level_usd, rearm=False)
 
     bot_by_signal = {r.signal_index: r for r in bot_rows_0}
     research_events = ablate.detect_compression(bars)
@@ -834,6 +849,7 @@ def main() -> None:
         print("mt5_import_stubbed,true")
         print("xau_cache," + str(args.xau_cache))
         print("old_v_2026_parity_01_status,INVALID_HARNESS_SAME_BAR_EXIT_BUG")
+        print("live_bot_entry_convention,range_edge_pending_stop_orders")
         print("research_exit_convention,ablate.simulate uses eval_start=entry_index+1; fill bar extremes are not evaluated against the new position")
         print("\nGOLDEN_LIVE_REPLAY_CHECK")
         for line in golden.lines:
@@ -852,14 +868,20 @@ def main() -> None:
             print(f"research_only,{i},{bars[i].start.isoformat()}")
 
         print("\nTRADE_PARITY_AND_BOT_MECHANICS")
-        print("stops_level_usd,bot_trades,bot_signals,signals_blocked_by_flatten,signals_no_valid_pending,side_skips,replaced_pending_sets")
-        for stops, rows, stats in (
-            (args.stops_level_usd, bot_rows_0, stats_0),
-            (args.realistic_stops_level_usd, bot_rows_real, stats_real),
+        print("logic,stops_level_usd,trades,signals,oco_armed,signals_flat_no_pending,signals_while_pending_skipped,signals_while_active_skipped,signals_blocked_by_flatten,signals_no_valid_pending,side_skips,replaced_pending_sets,trades_per_day")
+        for logic, stops, rows, stats in (
+            ("bot_guarded_own_orders", args.stops_level_usd, bot_rows_0, stats_0),
+            ("bot_guarded_realistic_stops", args.realistic_stops_level_usd, bot_rows_real, stats_real),
+            ("replace_every_signal_artifact", args.stops_level_usd, bot_rows_replace, stats_replace),
         ):
+            days = ((max(r.entry_time for r in rows) - min(r.entry_time for r in rows)).days + 1) if rows else math.nan
+            trades_per_day = len(rows) / days if days and math.isfinite(days) and days > 0 else math.nan
             print(
-                f"{stops:.4f},{len(rows)},{stats['signals']},{stats['signals_blocked_by_flatten']},"
-                f"{stats['signals_no_valid_pending']},{stats['side_skips']},{stats['replaced_pending_sets']}"
+                f"{logic},{stops:.4f},{len(rows)},{stats['signals']},{stats['oco_armed']},"
+                f"{stats['signals_flat_no_pending']},{stats['signals_while_pending_skipped']},"
+                f"{stats['signals_while_active_skipped']},{stats['signals_blocked_by_flatten']},"
+                f"{stats['signals_no_valid_pending']},{stats['side_skips']},{stats['replaced_pending_sets']},"
+                f"{fmt(trades_per_day, 4)}"
             )
         bot_net_by_signal = {r.signal_index: r.net_r for r in bot_rows_0}
         research_net_by_signal = {i: t.net_r for i, t in research_trade_by_signal.items()}
@@ -894,7 +916,7 @@ def main() -> None:
         for name, rows in (
             ("segmentation_research_style_signals", research_signal_rows),
             ("stops_level_realistic", bot_rows_real),
-            ("rearming_freeze_first_setup", bot_rows_freeze),
+            ("replace_every_signal_harness_artifact", bot_rows_replace),
         ):
             for period in ("train", "test"):
                 s = summarize_replay(rows, period)
@@ -906,7 +928,7 @@ def main() -> None:
         print("BUG_OR_DESIGN_DIVERGENCE,entry timing,bot arms OCO immediately after compression end; research pipeline waits for close-confirmed breakout then assigns range-edge fill")
         print("BUG_OR_DESIGN_DIVERGENCE,ATR/compression segmentation,bot uses rolling MT5 window with no segment reset while research resets ATR/compression at gaps")
         print("REALISTIC_CONSTRAINT,pending_stop_is_valid,bot may skip one/both pending sides when price is already too close to range edge")
-        print("REALISTIC_CONSTRAINT,re-arming,bot replaces unfilled pendings on each new compression signal while flat")
+        print("HARNESS_BUG_FIXED,re-arming,the previous primary replay replaced unfilled pendings on each signal; live bot own_orders() guard keeps existing pendings")
         print("REALISTIC_CONSTRAINT,session_flatten,bot blocks/cancels during flatten window; research closes at segment gaps")
         if not args.live_log.exists():
             print("RESEARCH_ARTIFACT,golden_live_csv_missing,cannot verify ticket-level live decisions from repo because live CSV is absent")
@@ -914,8 +936,10 @@ def main() -> None:
         print("\nVERDICT")
         if pass_gate:
             print("PASS: bot-logic replay clears zero in train/test and point estimates sit inside the pre-stated research reference CIs.")
+            print("CASE_A_HARNESS_BUG_FIXED: applying the live bot own_orders() guard brings the replay back in line with the validated research reference.")
         else:
-            print("FAIL: bot-logic replay does not satisfy the parity gate. The live walk-forward is testing a deployable bot variant, not a bit-for-bit replay of the validated research pipeline.")
+            print("FAIL: guarded bot-logic replay does not satisfy the parity gate. Re-arming over-trade was a harness bug, but another decision-layer divergence remains.")
+            print("CASE_B_GUARDED_REPLAY_STILL_DIVERGES: applying the own_orders() guard reduced the replace-every-signal artifact, but the guarded replay still over-trades and remains negative.")
     report = buffer.getvalue()
     print(report, end="")
     RESULTS_PATH.write_text(report)

@@ -15,4 +15,4 @@
 - 2026-07-02: V-2026-PARITY-02 result: FAIL; research matched 1/6 IUX truth trades. IUX bars fixed source-level mismatch, but validated close-breakout research logic did not reproduce the live bot's immediate-OCO trade set.
 - 2026-07-02: V-2026-PARITY-01 result: INVALIDATED by V-2026-PARITY-01B; harness evaluated SL/TP on the same bar as pending-stop entry fill, falsely attributing pre-fill extremes to the position.
 - 2026-07-02: V-2026-PARITY-01B registered. Engineering verification rerun after fixing fill-bar mechanics; pre-registered prediction: corrected bot-leg should land near research (+0.20 train / +0.26 test) minus a small deployment delta; any single divergence toggle moving net R by >0.10R is a named finding. Golden live replay >=95% is a hard gate before 10-year metrics.
-- 2026-07-02: V-2026-PARITY-01B result: FAIL; golden_match_pct=1.0000; bot_logic_train=-0.5107 [-0.5613,-0.4622], test=-0.4519 [-0.5034,-0.3969].
+- 2026-07-02: V-2026-PARITY-01B result: FAIL (CASE_B_GUARDED_REPLAY_STILL_DIVERGES); golden_match_pct=1.0000; bot_logic_train=-0.5350 [-0.5887,-0.4827], test=-0.4565 [-0.5128,-0.3931].
