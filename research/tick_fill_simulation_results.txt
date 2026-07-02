@@ -1,0 +1,35 @@
+V_2026_TICK_01_TICK_FILL_SIMULATION_AUDIT
+tick_file,data/2026.6.15XAUUSD-TICK-No Session.csv
+bar_cache,data/xauusd_m15_delta_bars.csv
+fill_model,buy_stop_ask_sell_stop_bid_tick_exits_real_spread
+live_bot_modified,false
+
+ORDER_MANAGEMENT_COUNTS
+metric,value
+signals,26038
+oco_armed,6956
+signals_skipped_pending,12801
+signals_skipped_active,6077
+signals_skipped_flatten,204
+pending_cancelled_flatten,372
+processed_rows,537449179
+
+NET_R_SUMMARY
+period,n,win_rate,net_r,ci_low,ci_high,avg_entry_spread,avg_exit_spread,avg_roundtrip_spread,false_breakout_rate,m15_stop_order_ref
+full,6584,0.3003,-0.2527,-0.2820,-0.2224,0.4008,0.4020,0.8027,0.6897,-0.4760
+train,4133,0.2923,-0.2748,-0.3117,-0.2377,0.3524,0.3510,0.7034,0.7002,-0.5246
+test,2451,0.3137,-0.2153,-0.2640,-0.1698,0.4823,0.4879,0.9702,0.6720,-0.4010
+
+ACTUAL_FILL_VS_EDGE_DISTRIBUTION_R
+n,median,p75,p90,mean
+6584,0.0189,0.0467,0.0963,0.0496
+
+EXIT_REASON_COUNTS
+reason,count
+force_close,79
+session_flatten,44
+stop,4541
+target,1920
+
+VERDICT
+Tick-level bid/ask simulation confirms the M15 fill-realism finding: the compression edge is not tradable as designed.
