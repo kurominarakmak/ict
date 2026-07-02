@@ -13,4 +13,4 @@
 - 2026-07-02: V-2026-PARITY-01 registered. Engineering verification, not a new hypothesis: replay live bot compression decision logic over historical XAUUSD M15 and compare to validated research pipeline.
 - 2026-07-02: V-2026-PARITY-01 result: INVALIDATED by V-2026-PARITY-01B; harness evaluated SL/TP on the same bar as pending-stop entry fill, falsely attributing pre-fill extremes to the position.
 - 2026-07-02: V-2026-PARITY-01B registered. Engineering verification rerun after fixing fill-bar mechanics; pre-registered prediction: corrected bot-leg should land near research (+0.20 train / +0.26 test) minus a small deployment delta; any single divergence toggle moving net R by >0.10R is a named finding. Golden live replay >=95% is a hard gate before 10-year metrics.
-- 2026-07-02: V-2026-PARITY-01B result: NOT_RUN_10YR; golden gate FAIL_NO_RECENT_BARS (match_pct=nan).
+- 2026-07-02: V-2026-PARITY-01B result: NOT_RUN_10YR; golden gate FAIL_MATCH_GATE (match_pct=0.0000).

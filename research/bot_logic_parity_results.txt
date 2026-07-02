@@ -7,9 +7,81 @@ research_exit_convention,ablate.simulate uses eval_start=entry_index+1; fill bar
 GOLDEN_LIVE_REPLAY_CHECK
 required_match_pct,0.9500
 live_log,research/iux_compression_breakout_live_log.csv
-historical_window_bars,0
-golden_status,FAIL_NO_RECENT_BARS
-note,Supply --recent-bars with M15 bars covering 2026-06-29 through 2026-07-02 or run this on EC2/Windows with the extended MT5 cache.
+historical_window_bars,276
+live_event_count,16
+harness_event_count,52
+reconciliation,event,live_time,harness_time,live_direction,harness_direction,live_high,harness_high,live_low,harness_low,live_intended,harness_intended,notes
+MISMATCH,signal,2026-06-29T21:30:00+00:00,,,,4032.05,,4005.39,,None,,compression confirmed; OCO pending stops placed at range edges
+MISMATCH,signal,2026-06-29T21:45:00+00:00,,,,4032.05,,4005.39,,None,,compression confirmed; OCO pending stops placed at range edges
+MISMATCH,signal,2026-06-29T23:00:00+00:00,,,,4030.82,,4005.39,,None,,compression confirmed; OCO pending stops placed at range edges
+MISMATCH,entry,2026-06-29T23:45:00+00:00,,short,,4030.82,,4005.39,,4005.39,,pending range-edge order filled; opposite pending cancelled
+MISMATCH,signal,2026-06-30T00:00:00+00:00,,,,4025.24,,4005.39,,None,,compression confirmed; OCO pending stops placed at range edges
+MISMATCH,entry,2026-06-30T00:00:00+00:00,,short,,4025.24,,4005.39,,4005.39,,pending range-edge order filled; opposite pending cancelled
+MISMATCH,signal,2026-06-30T00:30:00+00:00,,,,4022.36,,4005.39,,None,,compression confirmed; OCO pending stops placed at range edges
+MISMATCH,entry,2026-06-30T06:15:00+00:00,,long,,0.0,,0.0,,4022.58,,pending range-edge order filled; opposite pending cancelled
+MISMATCH,signal,2026-06-30T13:45:00+00:00,,,,4037.37,,4008.73,,None,,compression confirmed; OCO pending stops placed at range edges
+MISMATCH,entry,2026-06-30T13:45:00+00:00,,long,,4037.37,,4008.73,,4037.37,,pending range-edge order filled; opposite pending cancelled
+MISMATCH,order_skip,2026-06-30T14:00:00+00:00,,long,,4037.37,,4008.73,,4037.37,,buy_stop invalid or missed: entry=4037.37 <= ask+stops=4043.69; price already too close/beyond edge
+MISMATCH,signal,2026-06-30T14:00:00+00:00,,,,4037.37,,4008.73,,None,,compression confirmed; OCO pending stops placed at range edges
+MISMATCH,entry,2026-06-30T20:30:00+00:00,,short,,0.0,,0.0,,4008.6,,pending range-edge order filled; opposite pending cancelled; reconstructed after restart from open MT5 position
+MISMATCH,order_skip,2026-06-30T23:45:00+00:00,,short,,4033.81,,4006.14,,4006.14,,sell_stop invalid or missed: entry=4006.14 >= bid-stops=4005.85; price already too close/beyond edge
+MISMATCH,signal,2026-06-30T23:45:00+00:00,,,,4033.81,,4006.14,,None,,compression confirmed; OCO pending stops placed at range edges
+MISMATCH,entry,2026-07-01T11:30:00+00:00,,long,,0.0,,0.0,,4033.89,,pending range-edge order filled; opposite pending cancelled; reconstructed after restart from open MT5 position
+HARNESS_ONLY,signal,,2026-06-29T08:00:00+00:00,,oco,,4068.695,,4039.39,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-29T08:15:00+00:00,,oco,,4068.695,,4039.39,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-29T08:30:00+00:00,,oco,,4068.695,,4039.39,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-29T08:45:00+00:00,,oco,,4068.695,,4039.39,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-29T09:00:00+00:00,,oco,,4068.695,,4039.39,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-29T09:15:00+00:00,,oco,,4068.695,,4039.39,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-29T09:30:00+00:00,,oco,,4068.695,,4040.8,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-29T09:45:00+00:00,,oco,,4068.695,,4024.4165,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-29T10:00:00+00:00,,oco,,4068.695,,4024.4165,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-29T10:15:00+00:00,,oco,,4068.695,,4024.4165,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-29T10:30:00+00:00,,oco,,4068.695,,4024.4165,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-29T20:30:00+00:00,,oco,,4032.2285,,4005.4265,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-29T20:45:00+00:00,,oco,,4032.2285,,4005.4265,,None,compression confirmed
+HARNESS_ONLY,order_skip,,2026-06-29T22:00:00+00:00,,,,4030.8415,,4005.4265,,None,session flatten window
+HARNESS_ONLY,order_skip,,2026-06-29T22:15:00+00:00,,,,4025.3265,,4005.4265,,None,session flatten window
+HARNESS_ONLY,order_skip,,2026-06-29T22:30:00+00:00,,,,4025.3265,,4005.4265,,None,session flatten window
+HARNESS_ONLY,order_skip,,2026-06-29T22:45:00+00:00,,,,4025.3265,,4005.4265,,None,session flatten window
+HARNESS_ONLY,order_skip,,2026-06-29T23:00:00+00:00,,,,4025.3265,,4005.4265,,None,session flatten window
+HARNESS_ONLY,order_skip,,2026-06-29T23:15:00+00:00,,,,4022.4585,,4005.4265,,None,session flatten window
+HARNESS_ONLY,order_skip,,2026-06-29T23:30:00+00:00,,,,4022.4585,,4005.4265,,None,session flatten window
+HARNESS_ONLY,order_skip,,2026-06-29T23:45:00+00:00,,,,4022.4585,,4005.4265,,None,session flatten window
+HARNESS_ONLY,signal,,2026-06-30T00:00:00+00:00,,oco,,4022.4585,,4003.385,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-30T00:15:00+00:00,,oco,,4022.4585,,4003.385,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-30T00:30:00+00:00,,oco,,4022.4585,,3990.9765,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-30T00:45:00+00:00,,oco,,4022.4585,,3980.0315,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-30T01:00:00+00:00,,oco,,4022.4585,,3942.0565,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-30T01:15:00+00:00,,oco,,4022.4585,,3942.0565,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-30T01:30:00+00:00,,oco,,4022.4585,,3942.0565,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-30T01:45:00+00:00,,oco,,4022.4585,,3942.0565,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-30T12:45:00+00:00,,oco,,4037.51,,4008.805,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-30T13:00:00+00:00,,oco,,4037.51,,4008.805,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-30T13:15:00+00:00,,oco,,4037.51,,4008.805,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-30T13:30:00+00:00,,oco,,4037.51,,4008.805,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-30T13:45:00+00:00,,oco,,4037.51,,4008.805,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-30T20:30:00+00:00,,oco,,4033.975,,4010.185,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-06-30T20:45:00+00:00,,oco,,4033.91,,4006.51,,None,compression confirmed
+HARNESS_ONLY,order_skip,,2026-06-30T22:00:00+00:00,,,,4033.91,,4006.51,,None,session flatten window
+HARNESS_ONLY,order_skip,,2026-06-30T22:15:00+00:00,,,,4033.91,,4006.51,,None,session flatten window
+HARNESS_ONLY,order_skip,,2026-06-30T22:30:00+00:00,,,,4033.91,,4006.51,,None,session flatten window
+HARNESS_ONLY,order_skip,,2026-06-30T22:45:00+00:00,,,,4033.91,,4006.51,,None,session flatten window
+HARNESS_ONLY,order_skip,,2026-06-30T23:00:00+00:00,,,,4033.045,,4006.51,,None,session flatten window
+HARNESS_ONLY,order_skip,,2026-06-30T23:15:00+00:00,,,,4032.56,,4006.51,,None,session flatten window
+HARNESS_ONLY,order_skip,,2026-06-30T23:30:00+00:00,,,,4032.56,,4006.51,,None,session flatten window
+HARNESS_ONLY,order_skip,,2026-06-30T23:45:00+00:00,,,,4029.595,,4005.28,,None,session flatten window
+HARNESS_ONLY,signal,,2026-07-01T00:00:00+00:00,,oco,,4025.225,,4005.28,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-07-01T00:15:00+00:00,,oco,,4023.265,,4001.53,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-07-01T00:30:00+00:00,,oco,,4022.75,,3995.945,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-07-01T00:45:00+00:00,,oco,,4021.16,,3993.105,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-07-01T01:00:00+00:00,,oco,,4021.16,,3979.095,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-07-01T01:15:00+00:00,,oco,,4018.675,,3975.68,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-07-01T01:30:00+00:00,,oco,,4018.675,,3975.32,,None,compression confirmed
+HARNESS_ONLY,signal,,2026-07-01T01:45:00+00:00,,oco,,4018.675,,3974.015,,None,compression confirmed
+golden_matched,0
+golden_match_pct,0.0000
+golden_status,FAIL_MATCH_GATE
 
 TEN_YEAR_REPLAY_STATUS,NOT_RUN_GOLDEN_GATE_FAILED
 VERDICT,No 10-year bot-leg numbers are reported because the hard golden replay gate did not pass in this environment.
