@@ -1,0 +1,31 @@
+COMPRESSION_EXIT_TRAILING_AUDIT
+rules=validated compression entries; setup-end ATR; range-edge entry; $0.20 spread; 10-bar segment-aware force close
+config_C=mirrors research/live_shadow_trail_tracker.py simulate_config_c semantics
+
+CONFIG_TABLE
+config,period,n,win_rate,mean_net_r,ci_low,ci_high,avg_bars_held,mean_mfe_capture,max_drawdown_R,exit_distribution
+A_fixed_1p5R,train,1717,65.35%,0.1968,0.1147,0.2733,2.17,-0.6362,-40.12,force_close:24/1717=1.4%|stop:580/1717=33.8%|target:1113/1717=64.8%
+A_fixed_1p5R,test,1116,62.99%,0.2633,0.1731,0.3518,2.43,-0.5710,-23.98,force_close:31/1116=2.8%|stop:398/1116=35.7%|target:687/1116=61.6%
+B_fixed_2R,train,1717,58.12%,0.2477,0.1520,0.3384,2.84,-0.6826,-49.19,force_close:59/1717=3.4%|stop:694/1717=40.4%|target:964/1717=56.1%
+B_fixed_2R,test,1116,56.00%,0.3044,0.2031,0.4088,3.24,-0.6160,-23.86,force_close:66/1116=5.9%|stop:469/1116=42.0%|target:581/1116=52.1%
+C_trail_1ATR,train,1717,42.34%,-0.1337,-0.2307,-0.0380,2.57,-0.7840,-280.27,force_close:20/1717=1.2%|initial_stop:407/1717=23.7%|trail_hit:1290/1717=75.1%
+C_trail_1ATR,test,1116,42.92%,-0.1044,-0.1989,-0.0144,2.86,-0.7172,-117.93,force_close:23/1116=2.1%|initial_stop:291/1116=26.1%|trail_hit:802/1116=71.9%
+Cprime_trail_1p5ATR,train,1717,40.13%,-0.0756,-0.1727,0.0257,3.21,-0.7955,-175.09,force_close:41/1717=2.4%|initial_stop:407/1717=23.7%|trail_hit:1269/1717=73.9%
+Cprime_trail_1p5ATR,test,1116,39.16%,-0.0831,-0.1896,0.0243,3.59,-0.7381,-98.38,force_close:45/1116=4.0%|initial_stop:291/1116=26.1%|trail_hit:780/1116=69.9%
+
+YEARLY_C_VS_A
+year,A_net_R,C_net_R,C_minus_A,A_total_R,C_total_R
+2016,0.1510,-0.0549,-0.2060,43.79,-15.93
+2017,0.2186,-0.0684,-0.2871,68.22,-21.35
+2018,0.2761,-0.0772,-0.3533,79.52,-22.23
+2019,0.0776,-0.2657,-0.3432,23.27,-79.70
+2020,0.3192,-0.0858,-0.4050,93.21,-25.05
+2021,0.1274,-0.2779,-0.4053,29.93,-65.31
+2022,0.2668,-0.1973,-0.4640,68.29,-50.50
+2023,0.2377,-0.0629,-0.3006,57.05,-15.10
+2024,0.2074,-0.1354,-0.3427,53.29,-34.79
+2025,0.3782,0.0412,-0.3370,90.39,9.85
+2026,0.1998,-0.2093,-0.4091,24.78,-25.96
+
+PASS_GATE
+FAIL: C does not satisfy all pre-registered gates. C_train=-0.1337 vs A_train=0.1968; C_test=-0.1044 vs A_test=0.2633; C_CI_train=[-0.2213,-0.0422], C_CI_test=[-0.2002,-0.0011]; DD_train C/A=280.27/40.12, DD_test C/A=117.93/23.98
