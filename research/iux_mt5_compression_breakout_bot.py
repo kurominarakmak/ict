@@ -47,6 +47,7 @@ except ImportError as exc:  # pragma: no cover - depends on local MT5 install
 SYMBOL = os.getenv("IUX_SYMBOL", "XAUUSD")
 TIMEFRAME = mt5.TIMEFRAME_M15
 TIMEFRAME_SECONDS = 15 * 60
+GAP_SECONDS = 30 * 60
 HISTORY_BARS = int(os.getenv("IUX_HISTORY_BARS", "220"))
 
 COMPRESSION_WINDOW = 16
@@ -77,6 +78,7 @@ ORDER_COMMENT = "compression_breakout"
 @dataclass
 class LiveBar:
     index: int
+    segment_id: int
     time: datetime
     open: float
     high: float
@@ -132,15 +134,21 @@ def quantile(vals: list[float], q: float) -> float:
 
 def add_atr14(bars: list[LiveBar]) -> None:
     trs: list[float] = []
+    prev_segment: int | None = None
     for i, bar in enumerate(bars):
-        if i == 0:
+        if prev_segment is None or bar.segment_id != prev_segment:
+            trs.clear()
+            prev_bar = None
+        else:
+            prev_bar = bars[i - 1]
+        if prev_bar is None:
             tr = bar.high - bar.low
         else:
-            prev_close = bars[i - 1].close
+            prev_close = prev_bar.close
             tr = max(bar.high - bar.low, abs(bar.high - prev_close), abs(bar.low - prev_close))
         trs.append(tr)
-        if i + 1 >= ATR_PERIOD:
-            bar.atr14 = mean(trs[i - ATR_PERIOD + 1 : i + 1])
+        bar.atr14 = mean(trs[-ATR_PERIOD:]) if len(trs) >= ATR_PERIOD else None
+        prev_segment = bar.segment_id
 
 
 def trailing_atr_cutoff(bars: list[LiveBar], i: int) -> float | None:
@@ -162,6 +170,9 @@ def is_compression_end(bars: list[LiveBar], i: int) -> bool:
 
     start = i - COMPRESSION_WINDOW + 1
     if start < 0:
+        return False
+    segment = bars[i].segment_id
+    if any(bars[j].segment_id != segment for j in range(start, i + 1)):
         return False
     compressed = 0
     checked = 0
@@ -189,6 +200,7 @@ def load_closed_m15_bars(symbol: str, count: int) -> list[LiveBar]:
         bars.append(
             LiveBar(
                 index=0,
+                segment_id=0,
                 time=utc_from_timestamp(ts),
                 open=float(row["open"]),
                 high=float(row["high"]),
@@ -198,8 +210,14 @@ def load_closed_m15_bars(symbol: str, count: int) -> list[LiveBar]:
         )
     bars.sort(key=lambda b: b.time)
     bars = bars[-count:]
+    segment_id = 0
+    prev_time: datetime | None = None
     for idx, bar in enumerate(bars):
         bar.index = idx
+        if prev_time is not None and (bar.time - prev_time).total_seconds() > GAP_SECONDS:
+            segment_id += 1
+        bar.segment_id = segment_id
+        prev_time = bar.time
     add_atr14(bars)
     return bars
 
