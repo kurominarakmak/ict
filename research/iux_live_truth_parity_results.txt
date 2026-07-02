@@ -1,0 +1,40 @@
+V_2026_PARITY_02_IUX_LIVE_TRUTH_PARITY
+iux_bars,data/XAUUSD.iux_M15_202203300000_202607020000
+live_log,research/iux_compression_breakout_live_log.csv
+bar_range,2022-03-30T00:00:00+00:00 to 2026-07-02T00:00:00+00:00
+scope,logic_match_not_edge_test
+
+IUX_APP_TRUTH_SUMMARY
+truth_trades,6
+truth_wins,3
+truth_losses,3
+truth_total_usd,8.08
+
+RESEARCH_TRADES_ON_IUX_BARS
+research_id,setup_time,breakout_time,direction,entry,sl,tp,exit_price,exit_reason,gross_r,net_r
+1,2026-06-29T09:45:00+00:00,2026-06-29T10:45:00+00:00,SELL,4039.33,4047.59,4026.95,4052.39,stop,-1.5818,-1.6060
+2,2026-06-30T13:45:00+00:00,2026-06-30T15:00:00+00:00,BUY,4037.37,4030.29,4047.99,4047.99,target,1.5000,1.4717
+3,2026-06-30T21:15:00+00:00,2026-06-30T21:30:00+00:00,SELL,4012.49,4017.43,4005.09,4007.02,force_close,1.1082,1.0677
+
+SIX_TRADE_MATCH_TABLE
+truth_n,ticket,truth_direction,truth_actual_entry,truth_intended_entry,truth_exit,truth_pnl,truth_reason,research_id,research_entry,research_sl,research_tp,research_exit,research_reason,status,cause
+1,1236778817,SELL,4005.36,4005.39,4010.34,-4.98,stop,,,,,,,MISSED,research/bot logic divergence: live immediate OCO filled before research close-breakout event
+2,1236786444,SELL,4005.39,4005.39,3996.78,8.61,target,,,,,,,MISSED,research/bot logic divergence: live immediate OCO filled before research close-breakout event
+3,1236793113,BUY,4022.58,4022.36,4030.89,8.31,target,,,,,,,MISSED,research/bot logic divergence: live immediate OCO filled before research close-breakout event
+4,1236998331,BUY,4038.37,4037.37,4047.99,9.62,target,2,4037.37,4030.29,4047.99,4047.99,target,MATCH,same direction and intended range-edge entry
+5,1237003484,SELL,4008.60,4008.73,4016.54,-7.94,stop,,,,,,,MISSED,deployment constraint: live bot carried/reconstructed pending position across restart; research close-breakout pipeline has no pending-order state
+6,1237085443,BUY,4033.89,4033.81,4028.35,-5.54,stop,,,,,,,MISSED,deployment constraint: live bot carried/reconstructed pending position across restart; research close-breakout pipeline has no pending-order state
+
+EXTRA_RESEARCH_TRADES_NOT_IN_LIVE_TRUTH
+research_id,setup_time,breakout_time,direction,entry,sl,tp,exit_price,exit_reason,cause
+1,2026-06-29T09:45:00+00:00,2026-06-29T10:45:00+00:00,SELL,4039.33,4047.59,4026.95,4052.39,stop,operational/data artifact: before first live bot signal in CSV; bot may not have been running/trading
+3,2026-06-30T21:15:00+00:00,2026-06-30T21:30:00+00:00,SELL,4012.49,4017.43,4005.09,4007.02,force_close,research/bot logic divergence: research close-breakout event differs from live pending-OCO state
+
+MISMATCH_CLASSIFICATION
+class,count,details
+research_bot_logic_divergence,5,live immediate OCO pending stops produced trades that the close-confirmed research pipeline did not produce
+deployment_constraint,2,restart reconstruction/pending state affected trades 5 and 6; research pipeline has no broker pending-order state
+data_artifact,1,early extra research trade occurred before the first live CSV signal in this supplied log
+
+VERDICT
+FAIL: validated close-breakout research logic reproduced 1/6 IUX truth trades. IUX bars solve the data-source mismatch, but the live bot's immediate-OCO/re-arming/pending-state behavior is not the same deterministic trade set as the research pipeline. IUX-native backtesting of the current live bot needs a bot-mechanics replay, not the idealized close-breakout research pipeline.
