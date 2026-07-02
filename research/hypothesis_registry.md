@@ -8,3 +8,5 @@
 - 2026-07-02: H-2026-SESS-01 result: FAIL_FILTER_RULE no session has significantly negative net R in both train and test; trade all sessions under current evidence.
 - 2026-07-02: H-2026-EXIT-01 registered. Compression trailing exit hypothesis: Config C initial 1ATR stop, arm at closed-bar +1R, trail 1ATR behind best closed-bar favorable extreme, no fixed TP, 10-bar force close; pass only if C beats A in train/test, C CI clears zero in train/test, and maxDD is not >25% worse than A.
 - 2026-07-02: H-2026-EXIT-01 result: FAIL: C does not satisfy all pre-registered gates. C_train=-0.1337 vs A_train=0.1968; C_test=-0.1044 vs A_test=0.2633; C_CI_train=[-0.2213,-0.0422], C_CI_test=[-0.2002,-0.0011]; DD_train C/A=280.27/40.12, DD_test C/A=117.93/23.98
+- 2026-07-02: H-2026-TF-01 registered. Cross-timeframe replication/cost-rescue audit: unchanged validated compression spec on resampled H1/H4 XAU/XAG; fixed costs; no threshold tuning.
+- 2026-07-02: H-2026-TF-01 result: SILVER_RESCUE=FAIL (XAG_H1=FAIL, XAG_H4=FAIL_OR_DESCRIPTIVE); GOLD_H1_SECOND_STREAM=FAIL (overlap=no_h1_trades, daily_corr=no_h1_trades).

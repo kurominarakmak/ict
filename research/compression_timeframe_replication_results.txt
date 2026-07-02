@@ -1,0 +1,50 @@
+H_2026_TF_01_COMPRESSION_TIMEFRAME_REPLICATION
+spec=unchanged_validated_compression; rr=1.5; max_hold=10_bars_of_each_timeframe; no_threshold_tuning
+costs=XAUUSD_0.20_roundtrip,XAGUSD_0.02_roundtrip
+judgement_rule=split_n_lt_150_marked_descriptive_not_judged
+
+RESAMPLE_AND_SIGNAL_DIAGNOSTICS
+symbol,timeframe,bars,atr_bars,segments,max_segment_len,eligible_16_bar_windows,compressed_flag_count,max_compressed_streak,max_16_bar_compression_fraction,compression_end_count
+XAUUSD,M15_REF,246886,211799,2703,93,206319,71327,69,1.0000,26038
+XAUUSD,H1,61677,26616,2701,23,21189,9413,10,0.6250,0
+XAUUSD,H4,13389,0,2697,5,0,0,0,0.0000,0
+XAGUSD,M15_REF,247673,212413,2716,93,206909,71602,68,1.0000,24594
+XAGUSD,H1,61875,26661,2719,23,21214,9444,10,0.6250,0
+XAGUSD,H4,13430,0,2710,5,0,0,0,0.0000,0
+
+M15_REFERENCE_AND_FIXED_TF_GRID
+period,symbol,timeframe,n,status,win_rate,spread_atr,gross_r,gross_ci_low,gross_ci_high,net_r,net_ci_low,net_ci_high,flatten_trunc_pct,avg_atr,target_pct,stop_pct,force_pct,ci_clears_zero
+train,XAUUSD,M15_REF,1717,JUDGED,0.65,0.220714,0.4175,0.3398,0.4939,0.1968,0.1186,0.2728,0.01,1.1532,0.65,0.34,0.01,True
+train,XAUUSD,H1,0,DESCRIPTIVE_N_LT_150,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,False
+train,XAUUSD,H4,0,DESCRIPTIVE_N_LT_150,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,False
+train,XAGUSD,M15_REF,1576,JUDGED,0.51,0.977119,0.3480,0.2670,0.4257,-0.6291,-0.7065,-0.5510,0.01,0.0284,0.62,0.36,0.02,False
+train,XAGUSD,H1,0,DESCRIPTIVE_N_LT_150,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,False
+train,XAGUSD,H4,0,DESCRIPTIVE_N_LT_150,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,False
+test,XAUUSD,M15_REF,1116,JUDGED,0.63,0.104168,0.3674,0.2791,0.4533,0.2633,0.1729,0.3509,0.01,3.2625,0.62,0.36,0.03,True
+test,XAUUSD,H1,0,DESCRIPTIVE_N_LT_150,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,False
+test,XAUUSD,H4,0,DESCRIPTIVE_N_LT_150,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,False
+test,XAGUSD,M15_REF,1083,JUDGED,0.60,0.383777,0.2789,0.1796,0.3690,-0.1049,-0.1979,-0.0176,0.01,0.1028,0.58,0.38,0.04,False
+test,XAGUSD,H1,0,DESCRIPTIVE_N_LT_150,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,False
+test,XAGUSD,H4,0,DESCRIPTIVE_N_LT_150,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,False
+
+FULL_PERIOD_CONTEXT
+symbol,timeframe,n,win_rate,spread_atr,gross_r,net_r,net_ci_low,net_ci_high,flatten_trunc_pct,avg_atr
+XAUUSD,M15_REF,2833,0.64,0.174803,0.3978,0.2230,0.1697,0.2834,0.01,1.9841
+XAUUSD,H1,0,nan,nan,nan,nan,nan,nan,nan,nan
+XAUUSD,H4,0,nan,nan,nan,nan,nan,nan,nan,nan
+XAGUSD,M15_REF,2659,0.55,0.735453,0.3198,-0.4156,-0.4766,-0.3550,0.01,0.0587
+XAGUSD,H1,0,nan,nan,nan,nan,nan,nan,nan,nan
+XAGUSD,H4,0,nan,nan,nan,nan,nan,nan,nan,nan
+
+XAU_H1_VS_M15_INDEPENDENCE
+metric,value
+h1_trades,0
+h1_with_m15_trade_within_plus_minus_3_h1_bars,0
+h1_overlap_pct,nan
+daily_net_r_correlation,nan
+
+PRE_REGISTERED_GATE_VERDICTS
+gate,result,detail
+SILVER_RESCUE,FAIL,XAG_H1=FAIL; XAG_H4=FAIL_OR_DESCRIPTIVE
+GOLD_H1_SECOND_STREAM,FAIL,net_CI_gate_and_overlap_lt_40pct; overlap_pct=nan; daily_corr=nan
+H4_LIVE_CAUTION,INFO,10 H4 bars is roughly two days exposure; any live use needs a separate gap/financing audit.
