@@ -20,3 +20,5 @@
 - 2026-07-02: V-2026-FILL-01 result: FAIL_EDGE_DOES_NOT_SURVIVE_CLOSE_MARKET; close_then_market_train=-0.5949 [-0.6789,-0.5110], test=-0.4264 [-0.5190,-0.3337].
 - 2026-07-02: V-2026-TICK-01 registered. Tick-level verification of compression fill realism: fixed live-bot OCO stop model on Dukascopy XAUUSD bid/ask ticks, one realistic fill model, no live bot changes.
 - 2026-07-02: V-2026-TICK-01 result: FAIL_CONFIRMS_NOT_TRADABLE; train=-0.2748 [-0.3117,-0.2377], test=-0.2153 [-0.2640,-0.1698].
+- 2026-07-02: V-2026-M1FILL-01 registered. Tick-level M1 close-confirmation audit: M15 compression setup, closed M1 breakout confirmation, first later tick market fill, no lookahead, no live bot changes.
+- 2026-07-02: V-2026-M1FILL-01 result: FAIL_M1_CONFIRMATION_NOT_TRADABLE; train=-0.2923 [-0.3298,-0.2510], test=-0.2488 [-0.2997,-0.1985].

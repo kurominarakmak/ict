@@ -1,0 +1,41 @@
+V_2026_M1FILL_01_TICK_M1_CONFIRMATION_AUDIT
+tick_file,data/2026.6.15XAUUSD-TICK-No Session.csv
+bar_cache,data/xauusd_m15_delta_bars.csv
+model,M15 compression setup + closed M1 breakout confirmation + first later tick market fill
+lookahead,false
+live_bot_modified,false
+
+ORDER_MANAGEMENT_COUNTS
+metric,value
+signals,26038
+oco_armed,5802
+m1_confirmations,5393
+signals_skipped_pending,15522
+signals_skipped_active,4513
+signals_skipped_flatten,201
+pending_cancelled_flatten,411
+processed_rows,537450372
+
+NET_R_SUMMARY
+period,n,win_rate,net_r,ci_low,ci_high,avg_entry_spread,avg_exit_spread,stop_rate
+full,5391,0.2914,-0.2755,-0.3087,-0.2441,0.3655,0.3794,0.7008
+train,3310,0.2822,-0.2923,-0.3298,-0.2510,0.3129,0.3207,0.7121
+test,2081,0.3061,-0.2488,-0.2997,-0.1985,0.4492,0.4729,0.6828
+
+CONFIRM_CLOSE_BEYOND_EDGE_R
+n,median,p75,p90,mean
+5391,0.1521,0.3210,0.5743,0.2660
+
+ACTUAL_FILL_VS_EDGE_R
+n,median,p75,p90,mean
+5391,0.2910,0.4596,0.7284,0.3966
+
+EXIT_REASON_COUNTS
+reason,count
+force_close,60
+session_flatten,32
+stop,3778
+target,1521
+
+VERDICT
+M1 close confirmation still has negative train/test CIs. Faster confirmation reduces lag but does not rescue the compression edge.
