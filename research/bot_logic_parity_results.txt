@@ -1,94 +1,15 @@
-V_2026_PARITY_01_BOT_LOGIC_PARITY_AUDIT
+V_2026_PARITY_01B_BOT_LOGIC_PARITY_AUDIT
 live_bot_file_modified,false
 mt5_import_stubbed,true
-xau_cache,data/xauusd_m15_delta_bars.csv
-
-SIGNAL_PARITY
-research_signal_ends,bot_signal_ends,matched,bot_only,research_only,match_pct
-26038,51754,19859,31895,6179,0.342793
-mismatch_cause,count
-bot_rolling_atr_no_segment_reset_or_window_indexing,31819
-one_bar_boundary_shift,152
-research_segment_reset_or_full_history_atr_diff,6103
-first_50_mismatches,type,index,time
-bot_only,368,2016-01-07T23:00:00+00:00
-bot_only,369,2016-01-07T23:15:00+00:00
-bot_only,370,2016-01-07T23:30:00+00:00
-bot_only,371,2016-01-07T23:45:00+00:00
-bot_only,372,2016-01-08T00:00:00+00:00
-bot_only,373,2016-01-08T00:15:00+00:00
-bot_only,374,2016-01-08T00:30:00+00:00
-bot_only,375,2016-01-08T00:45:00+00:00
-bot_only,376,2016-01-08T01:00:00+00:00
-bot_only,377,2016-01-08T01:15:00+00:00
-bot_only,378,2016-01-08T01:30:00+00:00
-bot_only,379,2016-01-08T01:45:00+00:00
-bot_only,493,2016-01-11T07:15:00+00:00
-bot_only,558,2016-01-12T00:30:00+00:00
-bot_only,559,2016-01-12T00:45:00+00:00
-bot_only,560,2016-01-12T01:00:00+00:00
-bot_only,561,2016-01-12T01:15:00+00:00
-bot_only,562,2016-01-12T01:30:00+00:00
-bot_only,563,2016-01-12T01:45:00+00:00
-bot_only,564,2016-01-12T02:00:00+00:00
-bot_only,565,2016-01-12T02:15:00+00:00
-bot_only,566,2016-01-12T02:30:00+00:00
-bot_only,567,2016-01-12T02:45:00+00:00
-bot_only,568,2016-01-12T03:00:00+00:00
-bot_only,569,2016-01-12T03:15:00+00:00
-research_only,401,2016-01-08T07:15:00+00:00
-research_only,408,2016-01-08T09:00:00+00:00
-research_only,409,2016-01-08T09:15:00+00:00
-research_only,410,2016-01-08T09:30:00+00:00
-research_only,672,2016-01-13T06:00:00+00:00
-research_only,773,2016-01-14T08:15:00+00:00
-research_only,1393,2016-01-25T06:00:00+00:00
-research_only,1394,2016-01-25T06:15:00+00:00
-research_only,1395,2016-01-25T06:30:00+00:00
-research_only,1865,2016-02-01T09:00:00+00:00
-research_only,1866,2016-02-01T09:15:00+00:00
-research_only,1867,2016-02-01T09:30:00+00:00
-research_only,1868,2016-02-01T09:45:00+00:00
-research_only,1869,2016-02-01T10:00:00+00:00
-research_only,1870,2016-02-01T10:15:00+00:00
-research_only,1871,2016-02-01T10:30:00+00:00
-research_only,1872,2016-02-01T10:45:00+00:00
-research_only,1873,2016-02-01T11:00:00+00:00
-research_only,1874,2016-02-01T11:15:00+00:00
-research_only,1875,2016-02-01T11:30:00+00:00
-research_only,1876,2016-02-01T11:45:00+00:00
-research_only,1877,2016-02-01T12:00:00+00:00
-research_only,1878,2016-02-01T12:15:00+00:00
-research_only,1879,2016-02-01T12:30:00+00:00
-research_only,1880,2016-02-01T12:45:00+00:00
-
-TRADE_PARITY_AND_BOT_MECHANICS
-stops_level_usd,bot_trades,bot_signals,signals_blocked_by_flatten,signals_no_valid_pending,side_skips,replaced_pending_sets
-0.0000,9146,51754,4410,0,794,22558
-0.5000,7199,51754,4418,5,8974,29979
-matched_trade_signals,bot_only_trade_signals,research_only_trade_signals,common_net_r_delta,skipped_research_net_r,max_entry_diff,max_sl_diff,max_tp_diff,max_net_r_diff
-405,8741,2428,-493.6663,539.2068,0.000000,0.000000,0.000000,9.082661
-
-METRIC_PARITY
-logic,period,n,win_rate,net_r,ci_low,ci_high,trades_per_year,reference_ci_gate
-research_A,train,1717,0.6535,0.1968,0.1108,0.2723,287.28,n/a
-research_A,test,1116,0.6299,0.2633,0.1815,0.3544,251.77,n/a
-bot_logic_stops0,train,5163,0.2378,-1.0241,-1.0612,-0.9876,863.46,False
-bot_logic_stops0,test,3983,0.2478,-0.8774,-0.9213,-0.8369,898.02,False
-bot_logic_realistic_stops,train,3746,0.1706,-1.2545,-1.3014,-1.2136,626.48,diagnostic
-bot_logic_realistic_stops,test,3453,0.2091,-1.0084,-1.0538,-0.9618,778.52,diagnostic
+old_v_2026_parity_01_status,INVALID_HARNESS_SAME_BAR_EXIT_BUG
+research_exit_convention,ablate.simulate uses eval_start=entry_index+1; fill bar extremes are not evaluated against the new position
 
 GOLDEN_LIVE_REPLAY_CHECK
-golden_live_replay_status,NO_HISTORICAL_BARS_IN_WINDOW
+required_match_pct,0.9500
+live_log,research/iux_compression_breakout_live_log.csv
+historical_window_bars,0
+golden_status,FAIL_NO_RECENT_BARS
+note,Supply --recent-bars with M15 bars covering 2026-06-29 through 2026-07-02 or run this on EC2/Windows with the extended MT5 cache.
 
-DIVERGENCE_CLASSIFICATION
-class,item,assessment
-BUG_OR_DESIGN_DIVERGENCE,entry timing,bot arms OCO immediately after compression end; research pipeline waits for close-confirmed breakout then assigns range-edge fill
-BUG_OR_DESIGN_DIVERGENCE,ATR/compression segmentation,bot uses rolling MT5 window with no segment reset while research resets ATR/compression at gaps
-REALISTIC_CONSTRAINT,pending_stop_is_valid,bot may skip one/both pending sides when price is already too close to range edge
-REALISTIC_CONSTRAINT,re-arming,bot replaces unfilled pendings on each new compression signal while flat
-REALISTIC_CONSTRAINT,session_flatten,bot blocks/cancels during flatten window; research closes at segment gaps
-RESEARCH_ARTIFACT,golden_live_csv_missing,cannot verify ticket-level live decisions from repo because live CSV is absent
-
-VERDICT
-FAIL: bot-logic replay does not satisfy the parity gate. The live walk-forward is testing a deployable bot variant, not a bit-for-bit replay of the validated research pipeline.
+TEN_YEAR_REPLAY_STATUS,NOT_RUN_GOLDEN_GATE_FAILED
+VERDICT,No 10-year bot-leg numbers are reported because the hard golden replay gate did not pass in this environment.

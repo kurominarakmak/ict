@@ -1,5 +1,5 @@
 """
-V-2026-PARITY-01: engineering parity audit for the live compression bot.
+V-2026-PARITY-01B: engineering parity audit for the live compression bot.
 
 This is not a new trading hypothesis. It verifies whether the live bot decision
 logic, replayed over historical M15 XAUUSD bars, reproduces the validated
@@ -82,7 +82,10 @@ SEED = 20260702
 SPREAD = IUX_XAUUSD_ROUNDTRIP_SPREAD
 RESULTS_PATH = Path("research/bot_logic_parity_results.txt")
 REGISTRY_PATH = Path("research/hypothesis_registry.md")
-LIVE_LOG_PATH = Path("research/iux_compression_breakout_live_log.csv")
+DEFAULT_LIVE_LOG_PATH = Path("research/iux_compression_breakout_live_log.csv")
+GOLDEN_START = datetime(2026, 6, 29, tzinfo=timezone.utc)
+GOLDEN_END = datetime(2026, 7, 2, 23, 59, tzinfo=timezone.utc)
+GOLDEN_MIN_MATCH = 0.95
 
 
 @dataclass(frozen=True)
@@ -114,6 +117,25 @@ class ReplayTrade:
     skipped_sides: int
     stopped_by_validity: bool
     session_flattened: bool
+
+
+@dataclass(frozen=True)
+class HarnessEvent:
+    event: str
+    signal_time: datetime
+    direction: str
+    range_high: float | None
+    range_low: float | None
+    intended_entry: float | None
+    notes: str
+
+
+@dataclass(frozen=True)
+class GoldenResult:
+    passed: bool
+    status: str
+    match_pct: float
+    lines: list[str]
 
 
 def q(vals: list[float], pct: float) -> float:
@@ -191,6 +213,25 @@ def bot_signal_indexes(bars: list[DeltaBar], live_bars: list[bot.LiveBar]) -> di
     return out
 
 
+def research_style_signal_indexes(bars: list[DeltaBar]) -> dict[int, Signal]:
+    out: dict[int, Signal] = {}
+    for i in range(research.ATR_TRAIL + research.COMPRESSION_WINDOW, len(bars) - research.EXIT_HORIZON):
+        if not research.is_compression_end(bars, i):
+            continue
+        atr = bars[i].atr14
+        if atr is None or atr <= 0:
+            continue
+        window = bars[i - research.COMPRESSION_WINDOW + 1 : i + 1]
+        out[i] = Signal(
+            index=i,
+            time=bars[i].start,
+            range_high=max(b.high for b in window),
+            range_low=min(b.low for b in window),
+            atr=atr,
+        )
+    return out
+
+
 def is_flatten_time(ts: datetime) -> bool:
     if not bot.SESSION_FLATTEN_ENABLED:
         return False
@@ -215,6 +256,8 @@ def replay_bot_logic(
     bars: list[DeltaBar],
     signals: dict[int, Signal],
     stops_level_usd: float,
+    *,
+    rearm: bool = True,
 ) -> tuple[list[ReplayTrade], dict[str, int]]:
     trades: list[ReplayTrade] = []
     stats = {
@@ -259,6 +302,12 @@ def replay_bot_logic(
                 pending = None
 
         if active is not None:
+            # Research parity convention from compression_breakout_ablation_study.simulate:
+            # after a range-edge entry on bar i, exits are evaluated from i+1.
+            # The fill bar's earlier extremes are never attributed against the
+            # new position. This fixes V-2026-PARITY-01's false same-bar stops.
+            if i == int(active["entry_index"]):
+                continue
             direction = int(active["direction"])
             entry = float(active["entry"])
             sl = float(active["sl"])
@@ -323,6 +372,8 @@ def replay_bot_logic(
             continue
         if signal is not None:
             if pending is not None:
+                if not rearm:
+                    continue
                 stats["replaced_pending_sets"] += 1
             buy_valid = pending_valid(1, signal.range_high, bar, stops_level_usd)
             sell_valid = pending_valid(-1, signal.range_low, bar, stops_level_usd)
@@ -403,45 +454,200 @@ def signal_mismatch_causes(bot_only: set[int], research_only: set[int], bars: li
     return causes
 
 
-def golden_live_check(bars: list[DeltaBar], live_bars: list[bot.LiveBar]) -> list[str]:
+def parse_iso(raw: str) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def parse_float(raw: str | None) -> float | None:
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def harness_events_for_window(
+    bars: list[DeltaBar],
+    live_bars: list[bot.LiveBar],
+    stops_level_usd: float,
+) -> list[HarnessEvent]:
+    events: list[HarnessEvent] = []
+    idxs = [i for i, b in enumerate(bars) if GOLDEN_START <= b.start <= GOLDEN_END]
+    for i in idxs:
+        signal = bot_signal_at(bars, live_bars, i)
+        if signal is None:
+            continue
+        if is_flatten_time(bars[i].start):
+            events.append(HarnessEvent("order_skip", signal.time, "", signal.range_high, signal.range_low, None, "session flatten window"))
+            continue
+        buy_valid = pending_valid(1, signal.range_high, bars[i], stops_level_usd)
+        sell_valid = pending_valid(-1, signal.range_low, bars[i], stops_level_usd)
+        if not buy_valid:
+            events.append(HarnessEvent("order_skip", signal.time, "long", signal.range_high, signal.range_low, signal.range_high, "buy_stop invalid or missed"))
+        if not sell_valid:
+            events.append(HarnessEvent("order_skip", signal.time, "short", signal.range_high, signal.range_low, signal.range_low, "sell_stop invalid or missed"))
+        if buy_valid or sell_valid:
+            events.append(HarnessEvent("signal", signal.time, "oco", signal.range_high, signal.range_low, None, "compression confirmed"))
+    return events
+
+
+def live_events_for_window(live_log: Path) -> list[HarnessEvent]:
+    events: list[HarnessEvent] = []
+    with live_log.open(newline="") as handle:
+        for row in csv.DictReader(handle):
+            ts = parse_iso(row.get("signal_time", "")) or parse_iso(row.get("timestamp_utc", ""))
+            if ts is None or not (GOLDEN_START <= ts <= GOLDEN_END):
+                continue
+            event = row.get("event", "")
+            if event not in {"signal", "order_skip", "entry"}:
+                continue
+            direction = row.get("breakout_direction", "")
+            intended = parse_float(row.get("intended_entry"))
+            range_high = parse_float(row.get("range_high"))
+            range_low = parse_float(row.get("range_low"))
+            events.append(
+                HarnessEvent(
+                    event=event,
+                    signal_time=ts,
+                    direction=direction,
+                    range_high=range_high,
+                    range_low=range_low,
+                    intended_entry=intended,
+                    notes=row.get("notes", ""),
+                )
+            )
+    return events
+
+
+def event_matches(live: HarnessEvent, harness: HarnessEvent) -> bool:
+    if live.event != harness.event:
+        return False
+    if abs((live.signal_time - harness.signal_time).total_seconds()) > 60:
+        return False
+    for live_val, harness_val in (
+        (live.range_high, harness.range_high),
+        (live.range_low, harness.range_low),
+        (live.intended_entry, harness.intended_entry),
+    ):
+        if live_val is None or harness_val is None:
+            continue
+        if abs(live_val - harness_val) > 0.05:
+            return False
+    if live.event == "order_skip" and live.direction and harness.direction and live.direction != harness.direction:
+        return False
+    return True
+
+
+def golden_live_check(
+    bars: list[DeltaBar],
+    live_bars: list[bot.LiveBar],
+    live_log: Path,
+    stops_level_usd: float,
+) -> GoldenResult:
     lines = []
-    start = datetime(2026, 6, 29, tzinfo=timezone.utc)
-    end = datetime(2026, 7, 2, 23, 59, tzinfo=timezone.utc)
-    window = [b for b in bars if start <= b.start <= end]
-    idxs = [i for i, b in enumerate(bars) if start <= b.start <= end]
-    if not idxs:
-        return ["golden_live_replay_status,NO_HISTORICAL_BARS_IN_WINDOW"]
-    bot_sigs = [bot_signal_at(bars, live_bars, i) for i in idxs]
-    bot_sigs = [s for s in bot_sigs if s is not None]
-    lines.append("golden_live_replay_status,LIVE_CSV_MISSING" if not LIVE_LOG_PATH.exists() else "golden_live_replay_status,LIVE_CSV_FOUND")
-    lines.append("harness_window_bars," + str(len(window)))
-    lines.append("harness_signal_count," + str(len(bot_sigs)))
-    for sig in bot_sigs[:25]:
-        lines.append(f"harness_signal,{sig.time.isoformat()},{sig.range_high:.2f},{sig.range_low:.2f},{sig.atr:.6f}")
-    if not LIVE_LOG_PATH.exists():
-        lines.append("note,Actual live CSV not present at research/iux_compression_breakout_live_log.csv; cannot compare tickets/order_skip rows.")
-        return lines
-    with LIVE_LOG_PATH.open(newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    live_rows = [r for r in rows if start.isoformat()[:10] <= (r.get("signal_time") or r.get("timestamp_utc") or "")[:10] <= end.isoformat()[:10]]
-    lines.append("live_csv_rows_in_window," + str(len(live_rows)))
-    return lines
+    window = [b for b in bars if GOLDEN_START <= b.start <= GOLDEN_END]
+    lines.append("GOLDEN_LIVE_REPLAY_CHECK")
+    lines.append("required_match_pct,0.9500")
+    lines.append(f"live_log,{live_log}")
+    lines.append(f"historical_window_bars,{len(window)}")
+    if not window:
+        lines.append("golden_status,FAIL_NO_RECENT_BARS")
+        lines.append("note,Supply --recent-bars with M15 bars covering 2026-06-29 through 2026-07-02 or run this on EC2/Windows with the extended MT5 cache.")
+        return GoldenResult(False, "FAIL_NO_RECENT_BARS", math.nan, lines)
+    if not live_log.exists():
+        lines.append("golden_status,FAIL_LIVE_LOG_MISSING")
+        lines.append("note,Supply --live-log pointing to research/iux_compression_breakout_live_log.csv from the EC2/Windows machine.")
+        return GoldenResult(False, "FAIL_LIVE_LOG_MISSING", math.nan, lines)
+
+    harness_events = harness_events_for_window(bars, live_bars, stops_level_usd)
+    live_events = live_events_for_window(live_log)
+    lines.append(f"live_event_count,{len(live_events)}")
+    lines.append(f"harness_event_count,{len(harness_events)}")
+    lines.append("reconciliation,event,live_time,harness_time,live_direction,harness_direction,live_high,harness_high,live_low,harness_low,live_intended,harness_intended,notes")
+
+    used: set[int] = set()
+    matched = 0
+    for live_event in live_events:
+        best_idx = None
+        for j, harness_event in enumerate(harness_events):
+            if j in used:
+                continue
+            if event_matches(live_event, harness_event):
+                best_idx = j
+                break
+        if best_idx is None:
+            lines.append(
+                f"MISMATCH,{live_event.event},{live_event.signal_time.isoformat()},,"
+                f"{live_event.direction},,{live_event.range_high},{''},{live_event.range_low},{''},"
+                f"{live_event.intended_entry},{''},{live_event.notes}"
+            )
+            continue
+        used.add(best_idx)
+        matched += 1
+        harness_event = harness_events[best_idx]
+        lines.append(
+            f"MATCH,{live_event.event},{live_event.signal_time.isoformat()},{harness_event.signal_time.isoformat()},"
+            f"{live_event.direction},{harness_event.direction},{live_event.range_high},{harness_event.range_high},"
+            f"{live_event.range_low},{harness_event.range_low},{live_event.intended_entry},{harness_event.intended_entry},{live_event.notes}"
+        )
+    for j, harness_event in enumerate(harness_events):
+        if j in used:
+            continue
+        lines.append(
+            f"HARNESS_ONLY,{harness_event.event},,{harness_event.signal_time.isoformat()},,"
+            f"{harness_event.direction},,{harness_event.range_high},,{harness_event.range_low},,"
+            f"{harness_event.intended_entry},{harness_event.notes}"
+        )
+    denom = len(live_events) if live_events else math.nan
+    match_pct = matched / denom if denom and math.isfinite(denom) else math.nan
+    passed = math.isfinite(match_pct) and match_pct >= GOLDEN_MIN_MATCH
+    lines.append(f"golden_matched,{matched}")
+    lines.append(f"golden_match_pct,{fmt(match_pct, 4)}")
+    lines.append(f"golden_status,{'PASS' if passed else 'FAIL_MATCH_GATE'}")
+    return GoldenResult(passed, "PASS" if passed else "FAIL_MATCH_GATE", match_pct, lines)
 
 
-def append_registry(pass_gate: bool, bot_train: dict[str, float], bot_test: dict[str, float]) -> None:
+def append_registry_01b(
+    golden: GoldenResult,
+    pass_gate: bool | None,
+    bot_train: dict[str, float] | None,
+    bot_test: dict[str, float] | None,
+) -> None:
+    invalid = (
+        "- 2026-07-02: V-2026-PARITY-01 result: INVALIDATED by V-2026-PARITY-01B; "
+        "harness evaluated SL/TP on the same bar as pending-stop entry fill, falsely attributing pre-fill extremes to the position."
+    )
     registered = (
-        "- 2026-07-02: V-2026-PARITY-01 registered. Engineering verification, not a new hypothesis: "
-        "replay live bot compression decision logic over historical XAUUSD M15 and compare to validated research pipeline."
+        "- 2026-07-02: V-2026-PARITY-01B registered. Engineering verification rerun after fixing fill-bar mechanics; "
+        "pre-registered prediction: corrected bot-leg should land near research (+0.20 train / +0.26 test) minus a small deployment delta; "
+        "any single divergence toggle moving net R by >0.10R is a named finding. Golden live replay >=95% is a hard gate before 10-year metrics."
     )
-    result = (
-        "- 2026-07-02: V-2026-PARITY-01 result: "
-        f"{'PASS' if pass_gate else 'FAIL'}; "
-        f"bot_logic_train={bot_train['net']:.4f} [{bot_train['lo']:.4f},{bot_train['hi']:.4f}], "
-        f"test={bot_test['net']:.4f} [{bot_test['lo']:.4f},{bot_test['hi']:.4f}]."
-    )
+    if pass_gate is None or bot_train is None or bot_test is None:
+        result = (
+            "- 2026-07-02: V-2026-PARITY-01B result: NOT_RUN_10YR; "
+            f"golden gate {golden.status} (match_pct={fmt(golden.match_pct, 4)})."
+        )
+    else:
+        result = (
+            "- 2026-07-02: V-2026-PARITY-01B result: "
+            f"{'PASS' if pass_gate else 'FAIL'}; golden_match_pct={fmt(golden.match_pct, 4)}; "
+            f"bot_logic_train={bot_train['net']:.4f} [{bot_train['lo']:.4f},{bot_train['hi']:.4f}], "
+            f"test={bot_test['net']:.4f} [{bot_test['lo']:.4f},{bot_test['hi']:.4f}]."
+        )
     existing = REGISTRY_PATH.read_text() if REGISTRY_PATH.exists() else "# Hypothesis Registry\n"
-    lines = [line for line in existing.rstrip().splitlines() if "V-2026-PARITY-01" not in line]
-    lines.extend([registered, result])
+    lines = [
+        line
+        for line in existing.rstrip().splitlines()
+        if "V-2026-PARITY-01 result:" not in line
+        and "V-2026-PARITY-01B" not in line
+    ]
+    lines.extend([invalid, registered, result])
     REGISTRY_PATH.write_text("\n".join(lines) + "\n")
 
 
@@ -453,22 +659,52 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--xau-ticks", type=Path, default=Path("data/2026.6.15XAUUSD-TICK-No Session.csv"))
     parser.add_argument("--xau-cache", type=Path, default=Path("data/xauusd_m15_delta_bars.csv"))
+    parser.add_argument("--recent-bars", type=Path, default=None, help="Optional M15 cached-bar CSV covering the golden live window.")
+    parser.add_argument("--live-log", type=Path, default=DEFAULT_LIVE_LOG_PATH, help="Live bot CSV from the EC2/Windows machine.")
     parser.add_argument("--stops-level-usd", type=float, default=0.0)
     parser.add_argument("--realistic-stops-level-usd", type=float, default=0.50)
     args = parser.parse_args()
 
     bars = simple.load_symbol_bars("XAUUSD", args.xau_ticks, args.xau_cache)
     live_bars = build_bot_live_bars(bars)
+    golden_bars = research.load_cached_bars(args.recent_bars) if args.recent_bars is not None else bars
+    golden_live_bars = build_bot_live_bars(golden_bars)
+    golden = golden_live_check(golden_bars, golden_live_bars, args.live_log, args.stops_level_usd)
+    if not golden.passed:
+        report = "\n".join(
+            [
+                "V_2026_PARITY_01B_BOT_LOGIC_PARITY_AUDIT",
+                "live_bot_file_modified,false",
+                "mt5_import_stubbed,true",
+                "old_v_2026_parity_01_status,INVALID_HARNESS_SAME_BAR_EXIT_BUG",
+                "research_exit_convention,ablate.simulate uses eval_start=entry_index+1; fill bar extremes are not evaluated against the new position",
+                "",
+                *golden.lines,
+                "",
+                "TEN_YEAR_REPLAY_STATUS,NOT_RUN_GOLDEN_GATE_FAILED",
+                "VERDICT,No 10-year bot-leg numbers are reported because the hard golden replay gate did not pass in this environment.",
+                "",
+            ]
+        )
+        print(report, end="")
+        RESULTS_PATH.write_text(report)
+        append_registry_01b(golden, None, None, None)
+        print(f"\nresults_file={RESULTS_PATH}")
+        return
+
     research_signal_set = research_signal_indexes(bars)
     bot_signal_map = bot_signal_indexes(bars, live_bars)
+    research_style_signal_map = research_style_signal_indexes(bars)
     bot_signal_set = set(bot_signal_map)
     matched_signals = research_signal_set & bot_signal_set
     bot_only = bot_signal_set - research_signal_set
     research_only = research_signal_set - bot_signal_set
 
     research_rows = research_trades(bars)
-    bot_rows_0, stats_0 = replay_bot_logic(bars, bot_signal_map, args.stops_level_usd)
-    bot_rows_real, stats_real = replay_bot_logic(bars, bot_signal_map, args.realistic_stops_level_usd)
+    bot_rows_0, stats_0 = replay_bot_logic(bars, bot_signal_map, args.stops_level_usd, rearm=True)
+    bot_rows_real, stats_real = replay_bot_logic(bars, bot_signal_map, args.realistic_stops_level_usd, rearm=True)
+    bot_rows_freeze, stats_freeze = replay_bot_logic(bars, bot_signal_map, args.stops_level_usd, rearm=False)
+    research_signal_rows, research_signal_stats = replay_bot_logic(bars, research_style_signal_map, args.stops_level_usd, rearm=True)
 
     bot_by_signal = {r.signal_index: r for r in bot_rows_0}
     research_events = ablate.detect_compression(bars)
@@ -514,9 +750,15 @@ def main() -> None:
     buffer = io.StringIO()
     with redirect_stdout(buffer):
         print("V_2026_PARITY_01_BOT_LOGIC_PARITY_AUDIT")
+        print("version,01B")
         print("live_bot_file_modified,false")
         print("mt5_import_stubbed,true")
         print("xau_cache," + str(args.xau_cache))
+        print("old_v_2026_parity_01_status,INVALID_HARNESS_SAME_BAR_EXIT_BUG")
+        print("research_exit_convention,ablate.simulate uses eval_start=entry_index+1; fill bar extremes are not evaluated against the new position")
+        print("\nGOLDEN_LIVE_REPLAY_CHECK")
+        for line in golden.lines:
+            print(line)
         print("\nSIGNAL_PARITY")
         match_pct = len(matched_signals) / len(research_signal_set | bot_signal_set) if (research_signal_set | bot_signal_set) else math.nan
         print("research_signal_ends,bot_signal_ends,matched,bot_only,research_only,match_pct")
@@ -567,9 +809,18 @@ def main() -> None:
             s = summarize_replay(bot_rows_real, period)
             print(f"bot_logic_realistic_stops,{period},{s['n']},{fmt(s['win'], 4)},{fmt(s['net'])},{fmt(s['lo'])},{fmt(s['hi'])},{fmt(s['trades_per_year'], 2)},diagnostic")
 
-        print("\nGOLDEN_LIVE_REPLAY_CHECK")
-        for line in golden_live_check(bars, live_bars):
-            print(line)
+        print("\nATTRIBUTION_ABLATIONS")
+        print("toggle,period,n,win_rate,net_r,ci_low,ci_high,trades_per_year,delta_vs_bot_current")
+        base_summaries = {period: summarize_replay(bot_rows_0, period) for period in ("train", "test")}
+        for name, rows in (
+            ("segmentation_research_style_signals", research_signal_rows),
+            ("stops_level_realistic", bot_rows_real),
+            ("rearming_freeze_first_setup", bot_rows_freeze),
+        ):
+            for period in ("train", "test"):
+                s = summarize_replay(rows, period)
+                delta = s["net"] - base_summaries[period]["net"]
+                print(f"{name},{period},{s['n']},{fmt(s['win'], 4)},{fmt(s['net'])},{fmt(s['lo'])},{fmt(s['hi'])},{fmt(s['trades_per_year'], 2)},{fmt(delta)}")
 
         print("\nDIVERGENCE_CLASSIFICATION")
         print("class,item,assessment")
@@ -589,7 +840,7 @@ def main() -> None:
     report = buffer.getvalue()
     print(report, end="")
     RESULTS_PATH.write_text(report)
-    append_registry(pass_gate, bot_train, bot_test)
+    append_registry_01b(golden, pass_gate, bot_train, bot_test)
     print(f"\nresults_file={RESULTS_PATH}")
 
 

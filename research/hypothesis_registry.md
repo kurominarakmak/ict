@@ -11,4 +11,6 @@
 - 2026-07-02: H-2026-TF-01 registered. Cross-timeframe replication/cost-rescue audit: unchanged validated compression spec on resampled H1/H4 XAU/XAG; fixed costs; no threshold tuning.
 - 2026-07-02: H-2026-TF-01 result: SILVER_RESCUE=FAIL (XAG_H1=FAIL, XAG_H4=FAIL_OR_DESCRIPTIVE); GOLD_H1_SECOND_STREAM=FAIL (overlap=no_h1_trades, daily_corr=no_h1_trades).
 - 2026-07-02: V-2026-PARITY-01 registered. Engineering verification, not a new hypothesis: replay live bot compression decision logic over historical XAUUSD M15 and compare to validated research pipeline.
-- 2026-07-02: V-2026-PARITY-01 result: FAIL; bot_logic_train=-1.0241 [-1.0612,-0.9876], test=-0.8774 [-0.9213,-0.8369].
+- 2026-07-02: V-2026-PARITY-01 result: INVALIDATED by V-2026-PARITY-01B; harness evaluated SL/TP on the same bar as pending-stop entry fill, falsely attributing pre-fill extremes to the position.
+- 2026-07-02: V-2026-PARITY-01B registered. Engineering verification rerun after fixing fill-bar mechanics; pre-registered prediction: corrected bot-leg should land near research (+0.20 train / +0.26 test) minus a small deployment delta; any single divergence toggle moving net R by >0.10R is a named finding. Golden live replay >=95% is a hard gate before 10-year metrics.
+- 2026-07-02: V-2026-PARITY-01B result: NOT_RUN_10YR; golden gate FAIL_NO_RECENT_BARS (match_pct=nan).
