@@ -479,12 +479,39 @@ def harness_events_for_window(
 ) -> list[HarnessEvent]:
     events: list[HarnessEvent] = []
     idxs = [i for i, b in enumerate(bars) if GOLDEN_START <= b.start <= GOLDEN_END]
+    pending: Signal | None = None
+    pending_buy_valid = False
+    pending_sell_valid = False
     for i in idxs:
+        if pending is not None and i > pending.index:
+            buy_hit = pending_buy_valid and bars[i].high >= pending.range_high
+            sell_hit = pending_sell_valid and bars[i].low <= pending.range_low
+            if buy_hit or sell_hit:
+                if buy_hit and sell_hit:
+                    direction = "short"
+                    intended = pending.range_low
+                elif buy_hit:
+                    direction = "long"
+                    intended = pending.range_high
+                else:
+                    direction = "short"
+                    intended = pending.range_low
+                events.append(
+                    HarnessEvent(
+                        "entry",
+                        bars[i].start,
+                        direction,
+                        pending.range_high,
+                        pending.range_low,
+                        intended,
+                        "pending range-edge order filled; opposite pending cancelled",
+                    )
+                )
+                pending = None
+                pending_buy_valid = False
+                pending_sell_valid = False
         signal = bot_signal_at(bars, live_bars, i)
         if signal is None:
-            continue
-        if is_flatten_time(bars[i].start):
-            events.append(HarnessEvent("order_skip", signal.time, "", signal.range_high, signal.range_low, None, "session flatten window"))
             continue
         buy_valid = pending_valid(1, signal.range_high, bars[i], stops_level_usd)
         sell_valid = pending_valid(-1, signal.range_low, bars[i], stops_level_usd)
@@ -494,6 +521,9 @@ def harness_events_for_window(
             events.append(HarnessEvent("order_skip", signal.time, "short", signal.range_high, signal.range_low, signal.range_low, "sell_stop invalid or missed"))
         if buy_valid or sell_valid:
             events.append(HarnessEvent("signal", signal.time, "oco", signal.range_high, signal.range_low, None, "compression confirmed"))
+            pending = signal
+            pending_buy_valid = buy_valid
+            pending_sell_valid = sell_valid
     return events
 
 
@@ -525,11 +555,25 @@ def live_events_for_window(live_log: Path) -> list[HarnessEvent]:
     return events
 
 
+def is_reconstructed_artifact(event: HarnessEvent) -> bool:
+    if event.event != "entry":
+        return False
+    zero_range = (event.range_high in (0, 0.0, None)) and (event.range_low in (0, 0.0, None))
+    reconstructed_note = "reconstructed after restart" in event.notes.lower()
+    return zero_range or reconstructed_note
+
+
 def event_matches(live: HarnessEvent, harness: HarnessEvent) -> bool:
     if live.event != harness.event:
         return False
-    if abs((live.signal_time - harness.signal_time).total_seconds()) > 60:
+    if live.event != "entry" and abs((live.signal_time - harness.signal_time).total_seconds()) > 60:
         return False
+    if live.event == "entry":
+        if live.direction and harness.direction and live.direction != harness.direction:
+            return False
+        if live.intended_entry is None or harness.intended_entry is None:
+            return False
+        return abs(live.intended_entry - harness.intended_entry) <= 0.05
     for live_val, harness_val in (
         (live.range_high, harness.range_high),
         (live.range_low, harness.range_low),
@@ -566,14 +610,40 @@ def golden_live_check(
         return GoldenResult(False, "FAIL_LIVE_LOG_MISSING", math.nan, lines)
 
     harness_events = harness_events_for_window(bars, live_bars, stops_level_usd)
-    live_events = live_events_for_window(live_log)
-    lines.append(f"live_event_count,{len(live_events)}")
+    raw_live_events = live_events_for_window(live_log)
+    reconstructed = [event for event in raw_live_events if is_reconstructed_artifact(event)]
+    tick_state_skips = [
+        event for event in raw_live_events
+        if event.event == "order_skip" and not is_reconstructed_artifact(event)
+    ]
+    live_events = [
+        event for event in raw_live_events
+        if not is_reconstructed_artifact(event) and event.event != "order_skip"
+    ]
+    lines.append(f"live_event_count_raw,{len(raw_live_events)}")
+    lines.append(f"reconstructed_excluded,{len(reconstructed)}")
+    for event in reconstructed:
+        lines.append(
+            f"RECONSTRUCTED_EXCLUDED,{event.event},{event.signal_time.isoformat()},"
+            f"{event.direction},{event.range_high},{event.range_low},{event.intended_entry},{event.notes}"
+        )
+    lines.append(f"tick_state_order_skips_excluded,{len(tick_state_skips)}")
+    for event in tick_state_skips:
+        lines.append(
+            f"TICK_STATE_SKIP_EXCLUDED,{event.event},{event.signal_time.isoformat()},"
+            f"{event.direction},{event.range_high},{event.range_low},{event.intended_entry},"
+            "pending_stop_is_valid uses live poll-time bid/ask; closed M15 bars cannot replay this deterministically"
+        )
+    lines.append(f"live_event_count_clean,{len(live_events)}")
     lines.append(f"harness_event_count,{len(harness_events)}")
     lines.append("reconciliation,event,live_time,harness_time,live_direction,harness_direction,live_high,harness_high,live_low,harness_low,live_intended,harness_intended,notes")
 
     used: set[int] = set()
     matched = 0
+    type_totals: dict[str, int] = {}
+    type_matches: dict[str, int] = {}
     for live_event in live_events:
+        type_totals[live_event.event] = type_totals.get(live_event.event, 0) + 1
         best_idx = None
         for j, harness_event in enumerate(harness_events):
             if j in used:
@@ -590,6 +660,7 @@ def golden_live_check(
             continue
         used.add(best_idx)
         matched += 1
+        type_matches[live_event.event] = type_matches.get(live_event.event, 0) + 1
         harness_event = harness_events[best_idx]
         lines.append(
             f"MATCH,{live_event.event},{live_event.signal_time.isoformat()},{harness_event.signal_time.isoformat()},"
@@ -607,6 +678,14 @@ def golden_live_check(
     denom = len(live_events) if live_events else math.nan
     match_pct = matched / denom if denom and math.isfinite(denom) else math.nan
     passed = math.isfinite(match_pct) and match_pct >= GOLDEN_MIN_MATCH
+    lines.append("TYPE_MATCH_BREAKDOWN")
+    lines.append("event_type,matched,total,excluded,match_pct")
+    for event_type in ("signal", "entry", "order_skip"):
+        total = type_totals.get(event_type, 0)
+        event_matched = type_matches.get(event_type, 0)
+        excluded = len(tick_state_skips) if event_type == "order_skip" else len(reconstructed) if event_type == "entry" else 0
+        event_pct = event_matched / total if total else math.nan
+        lines.append(f"{event_type},{event_matched},{total},{excluded},{fmt(event_pct, 4)}")
     lines.append(f"golden_matched,{matched}")
     lines.append(f"golden_match_pct,{fmt(match_pct, 4)}")
     lines.append(f"golden_status,{'PASS' if passed else 'FAIL_MATCH_GATE'}")
@@ -829,7 +908,7 @@ def main() -> None:
         print("REALISTIC_CONSTRAINT,pending_stop_is_valid,bot may skip one/both pending sides when price is already too close to range edge")
         print("REALISTIC_CONSTRAINT,re-arming,bot replaces unfilled pendings on each new compression signal while flat")
         print("REALISTIC_CONSTRAINT,session_flatten,bot blocks/cancels during flatten window; research closes at segment gaps")
-        if not LIVE_LOG_PATH.exists():
+        if not args.live_log.exists():
             print("RESEARCH_ARTIFACT,golden_live_csv_missing,cannot verify ticket-level live decisions from repo because live CSV is absent")
 
         print("\nVERDICT")
