@@ -22,3 +22,5 @@
 - 2026-07-02: V-2026-TICK-01 result: FAIL_CONFIRMS_NOT_TRADABLE; train=-0.2748 [-0.3117,-0.2377], test=-0.2153 [-0.2640,-0.1698].
 - 2026-07-02: V-2026-M1FILL-01 registered. Tick-level M1 close-confirmation audit: M15 compression setup, closed M1 breakout confirmation, first later tick market fill, no lookahead, no live bot changes.
 - 2026-07-02: V-2026-M1FILL-01 result: FAIL_M1_CONFIRMATION_NOT_TRADABLE; train=-0.2923 [-0.3298,-0.2510], test=-0.2488 [-0.2997,-0.1985].
+- 2026-07-03: H-2026-MR-01 registered. Gold mean-reversion core audit: UTC-session VWAP mean, closed-bar +/-2.5ATR signal, realistic limit at VWAP +/-1.5ATR, TP at VWAP, SL one ATR beyond signal extreme, 10-bar time stop, no regime detection or ML.
+- 2026-07-03: H-2026-MR-01 result: FAIL_CORE_EDGE_DOES_NOT_CLEAR_REALISTIC_EV_GATE; realistic_limit_train=-0.7235 [-0.7393,-0.7059], test=-0.6893 [-0.7072,-0.6706].
