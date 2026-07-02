@@ -47,6 +47,7 @@ TRADE_COLUMNS = [
     "spread_component_at_entry",
     "pure_slippage",
     "estimated_roundtrip_spread",
+    "spread_sample_lag_seconds",
     "realized_spread_or_slippage",
     "entry_slippage",
     "trade_number",
@@ -94,6 +95,7 @@ def load_log_source(path: Path) -> pd.DataFrame:
         "spread_component_at_entry",
         "pure_slippage",
         "estimated_roundtrip_spread",
+        "spread_sample_lag_seconds",
         "realized_spread_or_slippage",
         "real_spread_at_entry",
         "real_spread_at_exit",
@@ -130,6 +132,7 @@ def completed_trades(df: pd.DataFrame) -> pd.DataFrame:
             "spread_component_at_entry",
             "pure_slippage",
             "real_spread_at_entry",
+            "spread_sample_lag_seconds",
             "timestamp_utc",
         ]
         entry_cols = [c for c in entry_cols if c in entries.columns]
@@ -141,6 +144,7 @@ def completed_trades(df: pd.DataFrame) -> pd.DataFrame:
                 "total_fill_diff": "entry_total_fill_diff",
                 "spread_component_at_entry": "entry_spread_component",
                 "pure_slippage": "entry_pure_slippage",
+                "spread_sample_lag_seconds": "entry_spread_sample_lag_seconds",
                 "timestamp_utc": "entry_logged_at",
             }
         )
@@ -422,6 +426,7 @@ def main() -> None:
             "entry_spread_component",
             "entry_pure_slippage",
             "estimated_roundtrip_spread",
+            "entry_spread_sample_lag_seconds",
             "cum_r",
             "drawdown_r",
         ]

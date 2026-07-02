@@ -46,6 +46,7 @@ def decompose(row: dict[str, str]) -> dict[str, float | str]:
     exit_price = fnum(row.get("exit_price"))
     entry_spread = fnum(row.get("real_spread_at_entry"))
     exit_spread = fnum(row.get("real_spread_at_exit"))
+    spread_lag = fnum(row.get("spread_sample_lag_seconds"))
     if intended is None or actual is None or atr is None:
         raise ValueError("missing intended/actual/ATR")
     total_fill_diff = d * (actual - intended)
@@ -70,6 +71,7 @@ def decompose(row: dict[str, str]) -> dict[str, float | str]:
         "atr": atr,
         "total_fill_diff": total_fill_diff,
         "spread_at_entry": entry_spread if entry_spread is not None else "",
+        "spread_sample_lag_seconds": spread_lag if spread_lag is not None else "",
         "spread_component": spread_component,
         "pure_slippage": pure_slippage,
         "gross_r_actual_fills": gross_r if gross_r is not None else "",
@@ -98,9 +100,26 @@ def main() -> None:
             merged.append(decompose(merged_row))
         except ValueError:
             continue
-    print("ticket,side,intended,actual,exit,ATR,total_fill_diff,spread_at_entry,spread_component,pure_slippage,gross_r_actual_fills,net_flat_020,net_realized_no_extra_spread,estimated_roundtrip_spread")
+    columns = [
+        "ticket",
+        "side",
+        "intended",
+        "actual",
+        "exit",
+        "atr",
+        "total_fill_diff",
+        "spread_at_entry",
+        "spread_sample_lag_seconds",
+        "spread_component",
+        "pure_slippage",
+        "gross_r_actual_fills",
+        "net_flat_020",
+        "net_realized_no_extra_spread",
+        "estimated_roundtrip_spread",
+    ]
+    print(",".join(columns))
     for row in merged:
-        print(",".join(str(row[k]) for k in row))
+        print(",".join(str(row[k]) for k in columns))
     pure = [float(row["pure_slippage"]) for row in merged if row["pure_slippage"] != ""]
     flat = [float(row["net_flat_020"]) for row in merged if row["net_flat_020"] != ""]
     realized = [float(row["net_realized_no_extra_spread"]) for row in merged if row["net_realized_no_extra_spread"] != ""]

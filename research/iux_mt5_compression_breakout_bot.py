@@ -110,6 +110,7 @@ class ActiveTrade:
     range_low: float
     setup_time: datetime
     real_spread_at_entry: float | str = ""
+    spread_sample_lag_seconds: float | str = ""
     bars_elapsed: int = 0
     reconstructed: bool = False
 
@@ -234,6 +235,7 @@ class CsvTradeLogger:
             "estimated_roundtrip_spread",
             "realized_spread_or_slippage",
             "real_spread_at_entry",
+            "spread_sample_lag_seconds",
             "real_spread_at_exit",
             "is_intersection",
             "bars_held",
@@ -307,6 +309,7 @@ class CompressionBreakoutStrategy(Strategy):
         self.setup: Optional[CompressionSetup] = None
         self.active: Optional[ActiveTrade] = None
         self.close_fail_alerted: set[tuple[int, str]] = set()
+        self.spread_samples: list[tuple[datetime, float]] = []
 
     def positions(self):
         return list(mt5.positions_get(symbol=self.symbol) or [])
@@ -320,6 +323,26 @@ class CompressionBreakoutStrategy(Strategy):
     def own_orders(self):
         orders = list(mt5.orders_get(symbol=self.symbol) or [])
         return [o for o in orders if int(o.magic) == self.magic]
+
+    def sample_spread_if_pending(self) -> None:
+        if not self.own_orders():
+            return
+        spread = self.current_real_spread()
+        if not isinstance(spread, (int, float)) or not math.isfinite(float(spread)):
+            return
+        self.spread_samples.append((datetime.now(timezone.utc), float(spread)))
+        self.spread_samples = self.spread_samples[-50:]
+
+    def spread_at_or_before_fill(self, fill_time: datetime) -> tuple[float | str, float | str]:
+        if not self.spread_samples:
+            spread = self.current_real_spread()
+            return spread, -1
+        prior = [sample for sample in self.spread_samples if sample[0] <= fill_time]
+        if prior:
+            sample_time, spread = min(prior, key=lambda item: abs((fill_time - item[0]).total_seconds()))
+        else:
+            sample_time, spread = min(self.spread_samples, key=lambda item: abs((fill_time - item[0]).total_seconds()))
+        return spread, (fill_time - sample_time).total_seconds()
 
     def reconcile(self, bars: list[LiveBar]) -> None:
         own_positions = self.own_positions()
@@ -340,6 +363,9 @@ class CompressionBreakoutStrategy(Strategy):
             else:
                 recovered = self.recover_setup_from_csv(int(pos.ticket), direction)
                 intended_entry = float(pos.price_open)
+                # ASSUMES SL = 1*ATR (current design). If the SL formula ever
+                # changes, this reconstruction must be updated or ATR will be
+                # silently wrong.
                 atr = abs(float(pos.price_open) - float(pos.sl)) if float(pos.sl) else (entry_bar.atr14 or bars[-1].atr14 or 0.0)
                 range_high = recovered.range_high if recovered is not None else 0.0
                 range_low = recovered.range_low if recovered is not None else 0.0
@@ -347,6 +373,7 @@ class CompressionBreakoutStrategy(Strategy):
                 if recovered is not None:
                     intended_entry = range_high if direction == 1 else range_low
                     atr = recovered.atr_at_setup or atr
+            entry_spread, spread_lag = self.spread_at_or_before_fill(entry_time)
             self.active = ActiveTrade(
                 position_ticket=int(pos.ticket),
                 direction=direction,
@@ -360,7 +387,8 @@ class CompressionBreakoutStrategy(Strategy):
                 range_high=range_high,
                 range_low=range_low,
                 setup_time=setup_time,
-                real_spread_at_entry=self.current_real_spread(),
+                real_spread_at_entry=entry_spread,
+                spread_sample_lag_seconds=spread_lag,
                 bars_elapsed=self.closed_bars_since(bars, entry_bar.time),
                 reconstructed=self.setup is None,
             )
@@ -381,6 +409,7 @@ class CompressionBreakoutStrategy(Strategy):
                 self.reconstruct_setup_from_orders(existing_orders, bars)
 
     def on_poll(self, bars: list[LiveBar]) -> None:
+        self.sample_spread_if_pending()
         self.recover_orphaned_exits(bars)
         self.reconcile_exit_if_position_closed(bars)
         self.reconcile(bars)
@@ -391,6 +420,7 @@ class CompressionBreakoutStrategy(Strategy):
             self.force_close_if_due(bars)
 
     def on_new_closed_bar(self, bars: list[LiveBar]) -> None:
+        self.sample_spread_if_pending()
         self.recover_orphaned_exits(bars)
         self.reconcile_exit_if_position_closed(bars)
         self.reconcile(bars)
@@ -647,6 +677,8 @@ class CompressionBreakoutStrategy(Strategy):
         pos = next((p for p in self.own_positions() if int(p.ticket) == self.active.position_ticket), None)
         if pos is None:
             return True
+        if (int(pos.ticket), "session_flatten") in self.close_fail_alerted:
+            return True
         self.close_position(pos, "session_flatten", bars[-1].time.isoformat(), "pre-session-gap flatten to match backtest and avoid unmanaged gap risk")
         return True
 
@@ -887,6 +919,8 @@ class CompressionBreakoutStrategy(Strategy):
             net_r_realized=net_r_realized,
             estimated_roundtrip_spread=cost_fields["estimated_roundtrip_spread"],
             realized_spread_or_slippage=trade.direction * (trade.actual_entry - trade.intended_entry),
+            real_spread_at_entry=trade.real_spread_at_entry,
+            spread_sample_lag_seconds=trade.spread_sample_lag_seconds,
             real_spread_at_exit=exit_spread,
             is_intersection=False,
             bars_held=bars_held,
@@ -1058,6 +1092,9 @@ class CompressionBreakoutStrategy(Strategy):
             raw_entry_spread = entry_row.get("real_spread_at_entry", "")
             if raw_entry_spread not in ("", None):
                 real_spread_at_entry = float(raw_entry_spread)
+            spread_sample_lag_seconds: float | str = entry_row.get("spread_sample_lag_seconds", "")
+            if spread_sample_lag_seconds not in ("", None):
+                spread_sample_lag_seconds = float(spread_sample_lag_seconds)
             setup_raw = entry_row.get("setup_time") or entry_row.get("signal_time") or entry_row.get("timestamp_utc")
             signal_raw = entry_row.get("signal_time") or entry_row.get("timestamp_utc")
             setup_time = datetime.fromisoformat(str(setup_raw).replace("Z", "+00:00"))
@@ -1082,6 +1119,7 @@ class CompressionBreakoutStrategy(Strategy):
             range_low=range_low,
             setup_time=setup_time,
             real_spread_at_entry=real_spread_at_entry,
+            spread_sample_lag_seconds=spread_sample_lag_seconds,
         )
         close_deal, match_method = self.find_closing_deal(trade)
         if close_deal is None:
@@ -1119,6 +1157,8 @@ class CompressionBreakoutStrategy(Strategy):
             "net_r_realized": gross_r,
             "estimated_roundtrip_spread": cost_fields["estimated_roundtrip_spread"],
             "realized_spread_or_slippage": direction * (actual_entry - intended_entry),
+            "real_spread_at_entry": real_spread_at_entry,
+            "spread_sample_lag_seconds": spread_sample_lag_seconds,
             "real_spread_at_exit": "",
             "is_intersection": False,
             "bars_held": self.closed_bars_since(bars, entry_bar_time),
@@ -1180,6 +1220,7 @@ class CompressionBreakoutStrategy(Strategy):
             atr_at_entry=trade.atr_at_entry,
             realized_spread_or_slippage=trade.direction * (trade.actual_entry - trade.intended_entry),
             real_spread_at_entry=entry_spread,
+            spread_sample_lag_seconds=trade.spread_sample_lag_seconds,
             estimated_roundtrip_spread=cost_fields["estimated_roundtrip_spread"],
             is_intersection=False,
             ticket=trade.position_ticket,
