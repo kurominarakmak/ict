@@ -29,6 +29,7 @@ from __future__ import annotations
 import csv
 import math
 import os
+import re
 import signal
 import time
 from dataclasses import dataclass
@@ -240,6 +241,8 @@ class CsvTradeLogger:
             "is_intersection",
             "bars_held",
             "ticket",
+            "deal_id",
+            "data_quality",
             "notes",
         ]
         if self.path.exists():
@@ -871,12 +874,18 @@ class CompressionBreakoutStrategy(Strategy):
         if close_deal is None:
             exit_price: float | str = ""
             exit_time: datetime | str = ""
-            exit_reason = "unknown"
+            exit_reason = "UNRECONCILED"
             gross_r: float | str = ""
             net_r: float | str = ""
             net_r_realized: float | str = ""
             bars_held: int | str = ""
-            notes = "closed position detected but no closing deal found in MT5 history"
+            notes = (
+                f"UNRECONCILED: closed position detected but no own position_id closing deal found in MT5 history; "
+                f"match_method={match_method}; position_id={trade.position_ticket}; no symbol/time fallback used"
+            )
+            data_quality = "exit_unmatched"
+            deal_id: int | str = ""
+            print(f"CLOSE RECONCILE ALERT: ticket={trade.position_ticket} exit unmatched by position_id", flush=True)
         else:
             exit_price = float(close_deal.price)
             exit_time = utc_from_timestamp(getattr(close_deal, "time", int(datetime.now(timezone.utc).timestamp())))
@@ -893,6 +902,8 @@ class CompressionBreakoutStrategy(Strategy):
                 f"deal={getattr(close_deal, 'ticket', '')}; mt5_reason={getattr(close_deal, 'reason', '')}; "
                 f"comment={getattr(close_deal, 'comment', '')}"
             )
+            data_quality = "ok"
+            deal_id = int(getattr(close_deal, "ticket", 0) or 0) or ""
         self.logger.write(
             event="exit",
             strategy=self.name,
@@ -925,6 +936,8 @@ class CompressionBreakoutStrategy(Strategy):
             is_intersection=False,
             bars_held=bars_held,
             ticket=trade.position_ticket,
+            deal_id=deal_id,
+            data_quality=data_quality,
             notes=notes,
         )
 
@@ -950,16 +963,30 @@ class CompressionBreakoutStrategy(Strategy):
         strict = [d for d in symbol_exits if int(getattr(d, "position_id", -1)) == trade.position_ticket]
         if strict:
             strict.sort(key=lambda d: int(getattr(d, "time", 0)))
-            return strict[-1], "position_id"
-        fallback = [
-            d for d in symbol_exits
-            if true_open_time is None or utc_from_timestamp(getattr(d, "time", 0)) >= true_open_time
-        ]
-        if fallback:
-            anchor = true_open_time or trade.entry_time
-            fallback.sort(key=lambda d: abs(int(getattr(d, "time", 0)) - int(anchor.timestamp())))
-            return fallback[0], "symbol_time_fallback"
-        return None, "no_match"
+            deal = strict[-1]
+            deal_id = int(getattr(deal, "ticket", 0) or 0)
+            if deal_id and self.exit_deal_used_by_other_ticket(deal_id, trade.position_ticket):
+                return None, f"deal_id_already_recorded:{deal_id}"
+            return deal, "position_id"
+        # Do not fall back to symbol/time. After restarts that can attach a
+        # different position's SL/TP deal to this ticket. Position_id is the
+        # only authoritative close-deal key.
+        return None, "no_position_id_match"
+
+    def exit_deal_used_by_other_ticket(self, deal_id: int, position_ticket: int) -> bool:
+        for row in self.logger.read_rows():
+            if row.get("event", "").lower() != "exit":
+                continue
+            row_ticket = str(row.get("ticket", "")).strip()
+            if row_ticket == str(position_ticket):
+                continue
+            row_deal = str(row.get("deal_id", "")).strip()
+            if not row_deal:
+                match = re.search(r"\bdeal=(\d+)\b", str(row.get("notes", "")))
+                row_deal = match.group(1) if match else ""
+            if row_deal == str(deal_id):
+                return True
+        return False
 
     def position_open_time_from_history(self, position_ticket: int) -> Optional[datetime]:
         start = datetime.now(timezone.utc) - timedelta(days=30)
@@ -1050,6 +1077,10 @@ class CompressionBreakoutStrategy(Strategy):
             if event == "entry":
                 entry_by_ticket[ticket] = row
             elif event == "exit":
+                data_quality = str(row.get("data_quality", "")).lower()
+                if data_quality in {"exit_unmatched", "corrupt_exit_reconcile"}:
+                    valid_exit_tickets.add(ticket)
+                    continue
                 has_r = row.get("gross_r") not in ("", None) and row.get("net_r_vs_020_spread") not in ("", None)
                 reason = str(row.get("exit_reason", "")).lower()
                 notes = str(row.get("notes", "")).lower()
@@ -1123,7 +1154,46 @@ class CompressionBreakoutStrategy(Strategy):
         )
         close_deal, match_method = self.find_closing_deal(trade)
         if close_deal is None:
-            return None
+            return {
+                "event": "exit",
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "strategy": self.name,
+                "magic": self.magic,
+                "symbol": self.symbol,
+                "signal_time": entry_bar_time.isoformat(),
+                "setup_time": setup_time.isoformat(),
+                "range_high": range_high,
+                "range_low": range_low,
+                "breakout_direction": "long" if direction == 1 else "short",
+                "intended_entry": intended_entry,
+                "actual_fill_price": actual_entry,
+                "total_fill_diff": "",
+                "spread_component_at_entry": "",
+                "pure_slippage": "",
+                "sl": sl,
+                "tp": tp,
+                "atr_at_entry": atr,
+                "exit_price": "",
+                "exit_time": "",
+                "exit_reason": "UNRECONCILED",
+                "gross_r": "",
+                "net_r_vs_020_spread": "",
+                "net_r_realized": "",
+                "estimated_roundtrip_spread": "",
+                "realized_spread_or_slippage": "",
+                "real_spread_at_entry": real_spread_at_entry,
+                "spread_sample_lag_seconds": spread_sample_lag_seconds,
+                "real_spread_at_exit": "",
+                "is_intersection": False,
+                "bars_held": self.closed_bars_since(bars, entry_bar_time),
+                "ticket": position_ticket,
+                "deal_id": "",
+                "data_quality": "exit_unmatched",
+                "notes": (
+                    f"UNRECONCILED orphaned exit: no own position_id closing deal found; "
+                    f"match_method={match_method}; position_id={position_ticket}; no symbol/time fallback used"
+                ),
+            }
         exit_price = float(close_deal.price)
         exit_time = utc_from_timestamp(getattr(close_deal, "time", int(datetime.now(timezone.utc).timestamp())))
         gross_r = direction * (exit_price - actual_entry) / atr
@@ -1163,6 +1233,8 @@ class CompressionBreakoutStrategy(Strategy):
             "is_intersection": False,
             "bars_held": self.closed_bars_since(bars, entry_bar_time),
             "ticket": position_ticket,
+            "deal_id": int(getattr(close_deal, "ticket", 0) or 0) or "",
+            "data_quality": "ok",
             "notes": f"orphaned exit recovered from MT5 history; match_method={match_method}; deal={getattr(close_deal, 'ticket', '')}; mt5_reason={getattr(close_deal, 'reason', '')}; comment={getattr(close_deal, 'comment', '')}",
         }
 
@@ -1226,7 +1298,11 @@ class CompressionBreakoutStrategy(Strategy):
             ticket=trade.position_ticket,
             notes=(
                 "pending range-edge order filled; opposite pending cancelled"
-                + ("; reconstructed after restart from open MT5 position" if trade.reconstructed else "")
+                + (
+                    f"; reconstructed after restart from open MT5 position; position_id_relinked={trade.position_ticket}"
+                    if trade.reconstructed
+                    else ""
+                )
             ),
         )
 
